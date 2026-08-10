@@ -61,6 +61,12 @@ const (
 	// for a whole GPU to free). Distinct from unknownGpuIndicator, which means the
 	// reservation genuinely failed and should be reaped.
 	pendingGpuIndicator = "-2"
+	// ReservationCascadeFinalizer is placed on externally-scheduled reservation pods so that
+	// deleting a reservation cascades to the GPU-fraction workloads it backs: a controller
+	// deletes those fractions and only removes this finalizer once they are gone. Without it,
+	// deleting the reservation frees the whole GPU in Slurm (slurm-bridge cancels the GRES job
+	// on pod termination) while the fractions keep running on it — a silent double-booking.
+	ReservationCascadeFinalizer = "kai.scheduler/reservation-cascade"
 )
 
 // ErrReservationPending signals that a GPU reservation pod was created and is still
@@ -751,6 +757,8 @@ func (rsc *service) createResourceReservationPod(
 		// Leave the pod unbound (no nodeName, no faked PodScheduled) so the external scheduler
 		// places it; the whole-GPU request keeps it from double-booking.
 		podSpec.Spec.SchedulerName = rsc.reservationSchedulerName
+		// Cascade-delete the backed fractions if this reservation is deleted (see finalizer doc).
+		podSpec.Finalizers = append(podSpec.Finalizers, ReservationCascadeFinalizer)
 	} else {
 		// Default behavior: pre-bind the reservation pod to the selected node and mark it
 		// PodScheduled so the kubelet/device-plugin admits it without any scheduling pass.

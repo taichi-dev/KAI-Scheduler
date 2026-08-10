@@ -189,6 +189,16 @@ func (app *App) Run(ctx context.Context) error {
 		setupLog.Error(err, "unable to create controller", "controller", "ReserveAhead")
 		return err
 	}
+
+	if err = (&controllers.ReservationCascadeReconciler{
+		Client:               app.manager.GetClient(),
+		Scheme:               app.manager.GetScheme(),
+		ReservationNamespace: app.Options.ResourceReservationNamespace,
+		Enabled:              app.Options.ReservationSchedulerName != "",
+	}).SetupWithManager(app.manager, app.reconcilerParams); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "ReservationCascade")
+		return err
+	}
 	// +kubebuilder:scaffold:builder
 
 	setupLog.Info("starting manager")
