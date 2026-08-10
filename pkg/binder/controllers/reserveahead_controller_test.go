@@ -128,6 +128,54 @@ func TestReserveAheadEnsuresReservationAndLabelsFraction(t *testing.T) {
 	}
 }
 
+func TestReserveAheadPackWonTearsDownReservation(t *testing.T) {
+	ctrlm := gomock.NewController(t)
+	rrs := mock_resourcereservation.NewMockInterface(ctrlm)
+	group := reserveAheadGroup("team", "frac-1")
+	// Fraction was reserve-ahead labeled, but the scheduler packed it onto a DIFFERENT freed group.
+	pod := raFraction("frac-1", time.Hour)
+	pod.Labels = map[string]string{constants.GPUGroup: group}
+	br := &schedulingv1alpha2.BindRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "frac-1", Namespace: "team"},
+		Spec:       schedulingv1alpha2.BindRequestSpec{PodName: "frac-1", SelectedNode: "node-y", SelectedGPUGroups: []string{"real-group-abc"}},
+	}
+	c := fake.NewClientBuilder().WithScheme(raTestScheme(t)).WithObjects(pod, br).Build()
+	r := &ReserveAheadReconciler{Client: c, ResourceReservation: rrs, SchedulerName: raSchedulerName, Enabled: true, Delay: 15 * time.Second}
+
+	// Teardown of the orphaned reserve-ahead reservation; NO EnsureReservation.
+	rrs.EXPECT().SyncForGpuGroup(gomock.Any(), group).Return(nil)
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "team", Name: "frac-1"}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := &v1.Pod{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "team", Name: "frac-1"}, got); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if got.Labels[constants.GPUGroup] != "real-group-abc" {
+		t.Errorf("pod group label = %q, want the real bound group real-group-abc", got.Labels[constants.GPUGroup])
+	}
+}
+
+func TestReserveAheadReservationWonIsKept(t *testing.T) {
+	ctrlm := gomock.NewController(t)
+	rrs := mock_resourcereservation.NewMockInterface(ctrlm)
+	group := reserveAheadGroup("team", "frac-1")
+	pod := raFraction("frac-1", time.Hour)
+	// BindRequest binds onto OUR reserve-ahead group (the reservation won the race).
+	br := &schedulingv1alpha2.BindRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "frac-1", Namespace: "team"},
+		Spec:       schedulingv1alpha2.BindRequestSpec{PodName: "frac-1", SelectedNode: "node-x", SelectedGPUGroups: []string{group}},
+	}
+	c := fake.NewClientBuilder().WithScheme(raTestScheme(t)).WithObjects(pod, br).Build()
+	r := &ReserveAheadReconciler{Client: c, ResourceReservation: rrs, SchedulerName: raSchedulerName, Enabled: true, Delay: 15 * time.Second}
+
+	// No reservation-service calls at all — the reservation is in use, nothing to do.
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "team", Name: "frac-1"}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestReserveAheadBindsWhenReservationPlaced(t *testing.T) {
 	ctrlm := gomock.NewController(t)
 	rrs := mock_resourcereservation.NewMockInterface(ctrlm)

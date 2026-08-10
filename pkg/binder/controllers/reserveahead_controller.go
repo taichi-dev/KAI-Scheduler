@@ -101,13 +101,40 @@ func (r *ReserveAheadReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// Only act on Pending, unbound, GPU-fraction pods managed by our scheduler.
+	// Only act on GPU-fraction pods managed by our scheduler.
 	if pod.Spec.SchedulerName != r.SchedulerName || !resources.RequestsGPUFraction(pod) {
 		return ctrl.Result{}, nil
 	}
+
+	// Once a BindRequest exists, the fraction's placement is decided — the reconciler MUST stop
+	// touching it (re-ensuring or re-labeling here would race the binder and corrupt accounting).
+	br := &schedulingv1alpha2.BindRequest{}
+	brErr := r.Client.Get(ctx, req.NamespacedName, br)
+	if brErr == nil {
+		if bindRequestUsesGroup(br, gpuGroup) {
+			// The reserve-ahead reservation won the race and is being bound onto — keep it.
+			return ctrl.Result{}, nil
+		}
+		// The scheduler packed the fraction onto a different GPU that freed up (pack won the
+		// race). Point the pod's group label at the real bound group so accounting is correct,
+		// then tear down our now-orphaned reserve-ahead reservation.
+		if podHasGpuGroup(pod, gpuGroup) && len(br.Spec.SelectedGPUGroups) > 0 {
+			if err := r.labelFractionGpuGroup(ctx, pod, br.Spec.SelectedGPUGroups[0]); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		if err := r.ResourceReservation.SyncForGpuGroup(ctx, gpuGroup); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to tear down reserve-ahead reservation for <%s/%s>: %w",
+				pod.Namespace, pod.Name, err)
+		}
+		return ctrl.Result{}, nil
+	} else if !apierrors.IsNotFound(brErr) {
+		return ctrl.Result{}, brErr
+	}
+
+	// No BindRequest. If the pod is already bound/terminal/terminating (without a BindRequest, e.g.
+	// completed), reap any reserve-ahead reservation it no longer references.
 	if pod.Spec.NodeName != "" || pod.Status.Phase != corev1.PodPending || pod.DeletionTimestamp != nil {
-		// Bound, terminal, or terminating: if the fraction did NOT settle on our reserve-ahead
-		// group, the reservation is orphaned — let the sync reap it.
 		if !podHasGpuGroup(pod, gpuGroup) {
 			if syncErr := r.ResourceReservation.SyncForGpuGroup(ctx, gpuGroup); syncErr != nil {
 				logger.Error(syncErr, "failed to sync reserve-ahead reservation for settled fraction",
@@ -212,6 +239,15 @@ func (r *ReserveAheadReconciler) labelFractionGpuGroup(ctx context.Context, pod 
 
 func podHasGpuGroup(pod *corev1.Pod, gpuGroup string) bool {
 	for _, g := range resources.GetGpuGroups(pod) {
+		if g == gpuGroup {
+			return true
+		}
+	}
+	return false
+}
+
+func bindRequestUsesGroup(br *schedulingv1alpha2.BindRequest, gpuGroup string) bool {
+	for _, g := range br.Spec.SelectedGPUGroups {
 		if g == gpuGroup {
 			return true
 		}
