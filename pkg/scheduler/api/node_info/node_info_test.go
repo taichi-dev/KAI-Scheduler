@@ -1637,6 +1637,16 @@ func TestPredicateByNodeResourcesType_SharedGPU_DRANode(t *testing.T) {
 			podResources: common_info.BuildResourceListWithGPU("1000m", "1G", "500m"),
 			wantErr:      false,
 		},
+		{
+			// meshy fork: a node exposing GPUs through BOTH the device plugin and DRA
+			// has the device-plugin accounting signals, so fractional pods are accepted
+			// even though HasDRAGPUs is true (the reservation is held via DRA).
+			name:         "fraction pod accepted on both device-plugin + DRA node",
+			node:         dpNode,
+			draGPUs:      4,
+			podResources: common_info.BuildResourceListWithGPU("1000m", "1G", "500m"),
+			wantErr:      false,
+		},
 	}
 
 	for _, tt := range tests {
