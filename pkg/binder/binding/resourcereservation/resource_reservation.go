@@ -37,6 +37,16 @@ type Interface interface {
 	SyncForGpuGroup(ctx context.Context, gpuGroup string) error
 	ReserveGpuDevice(ctx context.Context, pod *v1.Pod, nodeName string, gpuGroup string) (string, error)
 	RemovePodGpuGroupsConnection(ctx context.Context, pod *v1.Pod) error
+	// EnsureReservation creates (idempotently, by gpuGroup) a whole-GPU reservation pod for the
+	// given gpuGroup, WITHOUT binding it to a node — the external scheduler (slurm-bridge) places
+	// it. Used by the reserve-ahead controller to enqueue a reservation for a Pending fraction
+	// that cannot yet pack, so Slurm can make room (preempt) while the fraction waits. External
+	// reservation mode only.
+	EnsureReservation(ctx context.Context, sourcePod *v1.Pod, gpuGroup string) (*v1.Pod, error)
+	// ReservationPlacement reports whether the reservation pod for gpuGroup has been placed and is
+	// ready to back a fraction (Running, scheduled to a node, and has self-reported its GPU index),
+	// along with the node it landed on.
+	ReservationPlacement(ctx context.Context, gpuGroup string) (ready bool, nodeName string, err error)
 }
 
 const (
@@ -375,6 +385,38 @@ func (rsc *service) RemovePodGpuGroupsConnection(ctx context.Context, pod *v1.Po
 		return err
 	}
 	return nil
+}
+
+func (rsc *service) EnsureReservation(ctx context.Context, sourcePod *v1.Pod, gpuGroup string) (*v1.Pod, error) {
+	if !rsc.externalReservationMode() {
+		return nil, fmt.Errorf("reserve-ahead requires external reservation mode (reservationSchedulerName)")
+	}
+	// nodeName "" — the external scheduler (slurm-bridge) picks the node and places the pod.
+	return rsc.createGPUReservationPod(ctx, sourcePod, "", gpuGroup)
+}
+
+func (rsc *service) ReservationPlacement(ctx context.Context, gpuGroup string) (bool, string, error) {
+	gpuIndex, err := rsc.findGPUIndexByGroup(gpuGroup)
+	if err != nil {
+		// The reservation pod exists but has not self-reported its GPU index yet — not ready.
+		return false, "", nil
+	}
+	if gpuIndex == "" {
+		// No reservation pod for this group.
+		return false, "", nil
+	}
+	pods := &v1.PodList{}
+	if listErr := rsc.kubeClient.List(ctx, pods,
+		client.InNamespace(rsc.namespace),
+		client.MatchingLabels{constants.GPUGroup: gpuGroup}); listErr != nil {
+		return false, "", listErr
+	}
+	if len(pods.Items) == 0 {
+		return false, "", nil
+	}
+	pod := pods.Items[0]
+	ready := pod.Status.Phase == v1.PodRunning && pod.Spec.NodeName != ""
+	return ready, pod.Spec.NodeName, nil
 }
 
 // escapeJSONPointer escapes a string for use in a JSON Pointer path (RFC 6901).
