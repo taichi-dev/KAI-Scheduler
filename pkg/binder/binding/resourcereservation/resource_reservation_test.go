@@ -1701,3 +1701,54 @@ var _ = Describe("External reservation mode", func() {
 		Expect(pod.Name).To(Equal(reservationPodName(extNode, extGroup)))
 	})
 })
+
+func TestTimeoutAllocationIndicator(t *testing.T) {
+	const ns = "kai-resource-reservation"
+	const podName = "gpu-reservation-abc123"
+
+	newPod := func(phase v1.PodPhase) *v1.Pod {
+		return &v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: ns},
+			Status:     v1.PodStatus{Phase: phase},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		objects []runtimeClient.Object
+		want    string
+	}{
+		{
+			name:    "still pending -> parked",
+			objects: []runtimeClient.Object{newPod(v1.PodPending)},
+			want:    pendingGpuIndicator,
+		},
+		{
+			name:    "failed -> reap",
+			objects: []runtimeClient.Object{newPod(v1.PodFailed)},
+			want:    unknownGpuIndicator,
+		},
+		{
+			name:    "running-but-no-index -> reap",
+			objects: []runtimeClient.Object{newPod(v1.PodRunning)},
+			want:    unknownGpuIndicator,
+		},
+		{
+			name:    "not found -> reap",
+			objects: nil,
+			want:    unknownGpuIndicator,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rsc := &service{
+				namespace:  ns,
+				kubeClient: fake.NewClientBuilder().WithScheme(testScheme).WithObjects(tt.objects...).Build(),
+			}
+			if got := rsc.timeoutAllocationIndicator(context.Background(), podName); got != tt.want {
+				t.Errorf("timeoutAllocationIndicator = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

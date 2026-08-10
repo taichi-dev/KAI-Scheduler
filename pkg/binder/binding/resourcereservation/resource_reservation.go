@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -44,7 +45,23 @@ const (
 	gpuIndexAnnotationName  = "run.ai/reserve_for_gpu_index"
 	numberOfGPUsToReserve   = 1
 	unknownGpuIndicator     = "-1"
+	// pendingGpuIndicator is returned by waitForGPUReservationPodAllocation when the
+	// reservation pod did not allocate within the timeout but is still Pending (e.g. an
+	// external scheduler such as slurm-bridge has enqueued its Slurm job and is waiting
+	// for a whole GPU to free). Distinct from unknownGpuIndicator, which means the
+	// reservation genuinely failed and should be reaped.
+	pendingGpuIndicator = "-2"
 )
+
+// ErrReservationPending signals that a GPU reservation pod was created and is still
+// Pending (parked, e.g. waiting in an external scheduler's queue) rather than failed.
+// The BindRequest reconciler treats it as "retry later" — it must NOT roll back the
+// fraction pod's GPU-group binding or mark the BindRequest Failed, so the parked
+// reservation keeps its place in the queue and is reused on the next reconcile. The
+// parked reservation is protected from GC while its BindRequest stays non-terminal
+// (see hasActiveBindRequestsForGpuGroup) and is torn down by the reservation sync once
+// the fraction binds elsewhere (packs onto a freed GPU) and its BindRequest goes terminal.
+var ErrReservationPending = errors.New("gpu reservation pod is still pending allocation")
 
 type service struct {
 	fakeGPuNodes                        bool
@@ -415,6 +432,15 @@ func (rsc *service) createGPUReservationPodAndGetIndex(
 	}
 
 	gpuIndex = rsc.waitForGPUReservationPodAllocation(ctx, nodeName, pod.Name)
+	if gpuIndex == pendingGpuIndicator {
+		// The reservation is still Pending (parked): do NOT delete it. Keep it in place
+		// so it holds its spot in the external scheduler's queue and is reused on the next
+		// reconcile. The caller (BindRequest reconciler) requeues without rollback.
+		logger.Info("GPU reservation pod is still pending, parking it for retry",
+			"name", pod.Name, "gpuGroup", gpuGroup)
+		return unknownGpuIndicator, fmt.Errorf(
+			"gpu reservation pod %v/%v: %w", rsc.namespace, pod.Name, ErrReservationPending)
+	}
 	if gpuIndex == unknownGpuIndicator {
 		deleteErr := rsc.deleteReservationPod(ctx, pod)
 		if deleteErr != nil {
@@ -576,7 +602,10 @@ func (rsc *service) waitForGPUReservationPodAllocation(
 			logger.Error(fmt.Errorf("timeout"),
 				"Reached timeout while waiting for GPU reservation pod to be allocated",
 				"nodeName", nodeName, "name", gpuReservationPodName)
-			return unknownGpuIndicator
+			// A reservation that is still Pending after the timeout has not failed — an
+			// external scheduler (slurm-bridge) may have enqueued it and be waiting for a
+			// whole GPU. Signal "parked" so the caller keeps it instead of reaping it.
+			return rsc.timeoutAllocationIndicator(ctx, gpuReservationPodName)
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
 				logger.Error(nil,
@@ -598,6 +627,23 @@ func (rsc *service) waitForGPUReservationPodAllocation(
 			}
 		}
 	}
+}
+
+// timeoutAllocationIndicator classifies a reservation pod that did not report its GPU
+// index within the allocation timeout: pendingGpuIndicator if it still exists and is
+// Pending (parked, e.g. waiting in slurm-bridge's queue) so the caller keeps it, or
+// unknownGpuIndicator otherwise (gone / failed) so the caller reaps it.
+func (rsc *service) timeoutAllocationIndicator(ctx context.Context, gpuReservationPodName string) string {
+	pod := &v1.Pod{}
+	if err := rsc.kubeClient.Get(ctx,
+		types.NamespacedName{Namespace: rsc.namespace, Name: gpuReservationPodName}, pod); err != nil {
+		// Cannot confirm it is parked (e.g. not found): treat as failed so it is reaped.
+		return unknownGpuIndicator
+	}
+	if pod.Status.Phase == v1.PodPending {
+		return pendingGpuIndicator
+	}
+	return unknownGpuIndicator
 }
 
 func (rsc *service) createResourceReservationPod(
