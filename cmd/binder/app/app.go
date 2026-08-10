@@ -114,6 +114,10 @@ func New(options *Options, config *rest.Config) (*App, error) {
 		options.ResourceReservationPodResources.Value,
 		options.ResourceReservationPodSecurityContext.Value,
 		options.ResourceReservationContainerSecurityContext.Value)
+	if options.ReservationSchedulerName != "" {
+		rrs = rrs.WithExternalReservation(options.ReservationSchedulerName,
+			options.ReservationGpuResourceName, options.ReservationPodAnnotations)
+	}
 
 	reconcilerParams := &controllers.ReconcilerParams{
 		MaxConcurrentReconciles:     options.MaxConcurrentReconciles,

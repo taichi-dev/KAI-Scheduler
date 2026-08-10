@@ -1640,3 +1640,64 @@ var _ = Describe("Reservation pod duplicate gpu-group race", func() {
 func ptrBool(b bool) *bool { return &b }
 
 func ptrInt64(i int64) *int64 { return &i }
+
+var _ = Describe("External reservation mode", func() {
+	const (
+		extNode        = "kai-node"
+		extGroup       = "ext-gpu-group"
+		externalSched  = "slurm-bridge-scheduler"
+		draGpuResource = "deviceclass.resource.kubernetes.io/gpu.nvidia.com"
+	)
+
+	buildClient := func() runtimeClient.WithWatch {
+		return fake.NewClientBuilder().WithScheme(testScheme).
+			WithIndex(&v1.Pod{}, "spec.nodeName", nodeNameIndexer).Build()
+	}
+
+	It("creates an unbound reservation pod placed by the external scheduler with the DRA-backed GPU resource and configured annotations", func() {
+		rsc := initializeTestService(buildClient()).WithExternalReservation(
+			externalSched, draGpuResource,
+			map[string]string{
+				"slurmjob.slinky.slurm.net/qos":       "inference",
+				"slurmjob.slinky.slurm.net/exclusive": "false",
+			},
+		)
+
+		pod, err := rsc.createGPUReservationPod(context.TODO(), nil, extNode, extGroup)
+		Expect(err).To(Succeed())
+
+		// Unbound: an external scheduler (e.g. slurm-bridge) must place it, so no nodeName and no
+		// faked PodScheduled=True condition (which is what makes the default mode bypass scheduling).
+		Expect(pod.Spec.SchedulerName).To(Equal(externalSched))
+		Expect(pod.Spec.NodeName).To(BeEmpty())
+		Expect(pod.Status.Conditions).To(BeEmpty())
+
+		// Whole GPU is requested as the DRA-backed extended resource, not the classic device-plugin
+		// resource, so slurm-bridge accepts it and Slurm accounts it.
+		Expect(pod.Spec.Containers[0].Resources.Requests).To(HaveKey(v1.ResourceName(draGpuResource)))
+		Expect(pod.Spec.Containers[0].Resources.Limits).To(HaveKey(v1.ResourceName(draGpuResource)))
+		Expect(pod.Spec.Containers[0].Resources.Requests).ToNot(HaveKey(v1.ResourceName(constants.NvidiaGpuResource)))
+
+		// Configured annotations are stamped so slurm-bridge can build the Slurm job.
+		Expect(pod.Annotations).To(HaveKeyWithValue("slurmjob.slinky.slurm.net/qos", "inference"))
+		Expect(pod.Annotations).To(HaveKeyWithValue("slurmjob.slinky.slurm.net/exclusive", "false"))
+
+		// Name is keyed on the gpu-group only (no node at creation time), distinct from the pinned
+		// node-keyed name.
+		Expect(pod.Name).To(Equal(reservationPodName("", extGroup)))
+		Expect(pod.Name).ToNot(Equal(reservationPodName(extNode, extGroup)))
+	})
+
+	It("keeps the default pinned behavior when no external scheduler is configured", func() {
+		rsc := initializeTestService(buildClient())
+
+		pod, err := rsc.createGPUReservationPod(context.TODO(), nil, extNode, extGroup)
+		Expect(err).To(Succeed())
+
+		Expect(pod.Spec.SchedulerName).To(BeEmpty())
+		Expect(pod.Spec.NodeName).To(Equal(extNode))
+		Expect(pod.Status.Conditions).ToNot(BeEmpty())
+		Expect(pod.Spec.Containers[0].Resources.Requests).To(HaveKey(v1.ResourceName(constants.NvidiaGpuResource)))
+		Expect(pod.Name).To(Equal(reservationPodName(extNode, extGroup)))
+	})
+})

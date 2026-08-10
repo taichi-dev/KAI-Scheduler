@@ -74,6 +74,28 @@ type GlobalConfig struct {
 	// +kubebuilder:validation:Optional
 	SchedulerName *string `json:"schedulerName,omitempty"`
 
+	// ReservationSchedulerName, when set, makes the binder create GPU-sharing reservation
+	// pods with this `spec.schedulerName` (instead of pre-binding them via `spec.nodeName`),
+	// so an external scheduler (e.g. slurm-bridge-scheduler) places the whole-GPU reservation
+	// pod and KAI only sub-divides fractions onto it. Empty/nil preserves the default behavior
+	// where the binder pins the reservation pod to the scheduler-selected node.
+	// +kubebuilder:validation:Optional
+	ReservationSchedulerName *string `json:"reservationSchedulerName,omitempty"`
+
+	// ReservationPodAnnotations are extra annotations stamped onto externally-scheduled
+	// reservation pods (only used when ReservationSchedulerName is set), e.g. the
+	// slurmjob.slinky.slurm.net/{qos,exclusive} annotations slurm-bridge requires to build a
+	// Slurm job. Ignored in the default pinned mode.
+	// +kubebuilder:validation:Optional
+	ReservationPodAnnotations map[string]string `json:"reservationPodAnnotations,omitempty"`
+
+	// ReservationGpuResourceName overrides the resource key the reservation pod requests for a
+	// whole GPU (only used when ReservationSchedulerName is set). Empty defaults to
+	// "nvidia.com/gpu"; set it to "deviceclass.resource.kubernetes.io/gpu.nvidia.com" to request
+	// a DRA-backed extended resource that slurm-bridge accepts and Slurm accounts.
+	// +kubebuilder:validation:Optional
+	ReservationGpuResourceName *string `json:"reservationGpuResourceName,omitempty"`
+
 	// NodePoolLabelKey is the label name by with to filter nodes, pods and other resources that the scheduler is watching
 	// +kubebuilder:validation:Optional
 	NodePoolLabelKey *string `json:"nodePoolLabelKey,omitempty"`

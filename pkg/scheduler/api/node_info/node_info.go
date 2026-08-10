@@ -314,7 +314,12 @@ func (ni *NodeInfo) PredicateByNodeResourcesType(task *pod_info.PodInfo) error {
 		return nil
 	}
 
-	if ni.HasDRAGPUs && task.IsSharedGPURequest() {
+	// Reject fractional/shared GPU pods only on DRA-ONLY nodes (matching this message). A node
+	// that ALSO advertises device-plugin GPUs (AllocatableVector GPU > 0, with the
+	// nvidia.com/gpu.memory GFD label) has the signals KAI's sharing accounting needs, so
+	// fractional sharing works there even though the whole-GPU reservation is held via DRA
+	// (meshy fork: the reservation pod goes through slurm-bridge as a DRA-backed extended resource).
+	if ni.HasDRAGPUs && ni.AllocatableVector.Get(resource_info.GPUIndex) <= 0 && task.IsSharedGPURequest() {
 		return common_info.NewFitError(task.Name, task.Namespace, ni.Name,
 			"fractional/shared GPU pods are not yet supported on DRA-only nodes")
 	}

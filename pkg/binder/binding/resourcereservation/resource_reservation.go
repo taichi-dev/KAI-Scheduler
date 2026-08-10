@@ -60,6 +60,9 @@ type service struct {
 	podResources                        *v1.ResourceRequirements
 	reservationPodSecurityContext       *v1.PodSecurityContext
 	reservationContainerSecurityContext *v1.SecurityContext
+	reservationSchedulerName            string
+	reservationGpuResourceName          string
+	reservationPodAnnotations           map[string]string
 }
 
 func NewService(
@@ -91,6 +94,39 @@ func NewService(
 		reservationPodSecurityContext:       reservationPodSecurityContext,
 		reservationContainerSecurityContext: reservationContainerSecurityContext,
 	}
+}
+
+// WithExternalReservation switches the service into "external reservation" mode: reservation
+// pods are created unbound with the given spec.schedulerName (so an external scheduler places
+// them) instead of being pre-bound via spec.nodeName. They request gpuResourceName for the whole
+// GPU (defaulting to nvidia.com/gpu when empty) and carry the given extra annotations. Passing an
+// empty schedulerName leaves the service in the default pinned mode.
+func (rsc *service) WithExternalReservation(schedulerName, gpuResourceName string, podAnnotations map[string]string) *service {
+	rsc.reservationSchedulerName = schedulerName
+	rsc.reservationGpuResourceName = gpuResourceName
+	rsc.reservationPodAnnotations = podAnnotations
+	return rsc
+}
+
+func (rsc *service) externalReservationMode() bool {
+	return rsc.reservationSchedulerName != ""
+}
+
+func (rsc *service) gpuResourceName() v1.ResourceName {
+	if rsc.reservationGpuResourceName != "" {
+		return v1.ResourceName(rsc.reservationGpuResourceName)
+	}
+	return constants.NvidiaGpuResource
+}
+
+// reservationPodAnnotationsMap returns the annotations to stamp on a reservation pod: always the
+// karpenter do-not-disrupt annotation, plus any configured external-mode annotations.
+func (rsc *service) reservationPodAnnotationsMap() map[string]string {
+	annotations := map[string]string{
+		karpenterv1.DoNotDisruptAnnotationKey: "true",
+	}
+	maps.Copy(annotations, rsc.reservationPodAnnotations)
+	return annotations
 }
 
 func (rsc *service) Sync(ctx context.Context) error {
@@ -388,6 +424,30 @@ func (rsc *service) createGPUReservationPodAndGetIndex(
 			"failed waiting for GPU reservation pod to allocate: %v/%v", rsc.namespace, pod.Name)
 	}
 
+	if rsc.externalReservationMode() && nodeName != "" {
+		// The reservation pod is running now (it self-reported its GPU index), so the external
+		// scheduler has set its nodeName. In v1 (static single-GPU-node pool) the fraction pod is
+		// bound to the scheduler-selected node, so the reservation must have landed there too;
+		// otherwise the fraction would share a GPU that lives on a different node. Fail loudly
+		// instead of binding to the wrong node. True multi-node "follow the reservation" is a
+		// Phase-2 change to the bind path.
+		placed := &v1.Pod{}
+		if getErr := rsc.kubeClient.Get(ctx,
+			types.NamespacedName{Namespace: rsc.namespace, Name: pod.Name}, placed); getErr != nil {
+			return unknownGpuIndicator, fmt.Errorf(
+				"failed to read externally-scheduled reservation pod %v/%v: %w", rsc.namespace, pod.Name, getErr)
+		}
+		if placed.Spec.NodeName != "" && placed.Spec.NodeName != nodeName {
+			if deleteErr := rsc.deleteReservationPod(ctx, placed); deleteErr != nil {
+				logger.Error(deleteErr, "failed to delete diverged reservation pod", "name", pod.Name)
+			}
+			return unknownGpuIndicator, fmt.Errorf(
+				"external reservation pod %v/%v was placed on node %q but the scheduler selected %q; "+
+					"multi-node external placement is not supported in v1 (static single-GPU-node pool)",
+				rsc.namespace, pod.Name, placed.Spec.NodeName, nodeName)
+		}
+	}
+
 	return gpuIndex, err
 }
 
@@ -433,25 +493,35 @@ func (rsc *service) createGPUReservationPod(
 		return nil, fmt.Errorf("cluster is scaling up, could not create reservation pod")
 	}
 
-	podName := reservationPodName(nodeName, gpuGroup)
+	// In external-reservation mode the pod is not pre-bound, so its name must not depend on a
+	// node (there isn't one yet) — key it on the gpu-group only so concurrent/retried creates
+	// still collide on a single object.
+	nameNode := nodeName
+	if rsc.externalReservationMode() {
+		nameNode = ""
+	}
+	podName := reservationPodName(nameNode, gpuGroup)
 
-	// Build resource requirements starting with GPU resources
+	// Build resource requirements starting with the whole-GPU request. The resource key is
+	// configurable (e.g. deviceclass.resource.kubernetes.io/gpu.nvidia.com for a DRA-backed
+	// extended resource under slurm-bridge) and defaults to nvidia.com/gpu.
+	gpuResource := rsc.gpuResourceName()
 	resources := v1.ResourceRequirements{
 		Limits: v1.ResourceList{
-			constants.NvidiaGpuResource: *resource.NewQuantity(numberOfGPUsToReserve, resource.DecimalSI),
+			gpuResource: *resource.NewQuantity(numberOfGPUsToReserve, resource.DecimalSI),
 		},
 		Requests: v1.ResourceList{
-			constants.NvidiaGpuResource: *resource.NewQuantity(numberOfGPUsToReserve, resource.DecimalSI),
+			gpuResource: *resource.NewQuantity(numberOfGPUsToReserve, resource.DecimalSI),
 		},
 	}
 
 	if rsc.podResources != nil {
 		if rsc.podResources.Limits != nil {
-			delete(rsc.podResources.Limits, constants.NvidiaGpuResource)
+			delete(rsc.podResources.Limits, gpuResource)
 			maps.Copy(resources.Limits, rsc.podResources.Limits)
 		}
 		if rsc.podResources.Requests != nil {
-			delete(rsc.podResources.Requests, constants.NvidiaGpuResource)
+			delete(rsc.podResources.Requests, gpuResource)
 			maps.Copy(resources.Requests, rsc.podResources.Requests)
 		}
 	}
@@ -547,12 +617,9 @@ func (rsc *service) createResourceReservationPod(
 				constants.AppLabelName: rsc.appLabelValue,
 				constants.GPUGroup:     gpuGroup,
 			},
-			Annotations: map[string]string{
-				karpenterv1.DoNotDisruptAnnotationKey: "true",
-			},
+			Annotations: rsc.reservationPodAnnotationsMap(),
 		},
 		Spec: v1.PodSpec{
-			NodeName:    nodeName,
 			Tolerations: tolerations,
 			RuntimeClassName: func() *string {
 				if len(rsc.runtimeClassName) == 0 {
@@ -590,14 +657,24 @@ func (rsc *service) createResourceReservationPod(
 				},
 			},
 		},
-		Status: v1.PodStatus{
+	}
+
+	if rsc.externalReservationMode() {
+		// Leave the pod unbound (no nodeName, no faked PodScheduled) so the external scheduler
+		// places it; the whole-GPU request keeps it from double-booking.
+		podSpec.Spec.SchedulerName = rsc.reservationSchedulerName
+	} else {
+		// Default behavior: pre-bind the reservation pod to the selected node and mark it
+		// PodScheduled so the kubelet/device-plugin admits it without any scheduling pass.
+		podSpec.Spec.NodeName = nodeName
+		podSpec.Status = v1.PodStatus{
 			Conditions: []v1.PodCondition{
 				{
 					Type:   v1.PodScheduled,
 					Status: v1.ConditionTrue,
 				},
 			},
-		},
+		}
 	}
 
 	if rsc.fakeGPuNodes {

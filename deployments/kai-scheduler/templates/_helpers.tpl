@@ -72,6 +72,16 @@ spec:
     {{- if .Values.global.jsonLog }}
     jsonLog: true
     {{- end }}
+    {{- if .Values.global.reservationSchedulerName }}
+    reservationSchedulerName: {{ .Values.global.reservationSchedulerName | quote }}
+    {{- end }}
+    {{- if .Values.global.reservationGpuResourceName }}
+    reservationGpuResourceName: {{ .Values.global.reservationGpuResourceName | quote }}
+    {{- end }}
+    {{- if .Values.global.reservationPodAnnotations }}
+    reservationPodAnnotations:
+      {{- toYaml .Values.global.reservationPodAnnotations | nindent 6 }}
+    {{- end }}
     {{- if .Values.global.affinity }}
     affinity:
       {{- toYaml .Values.global.affinity | nindent 6 }}

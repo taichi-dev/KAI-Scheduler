@@ -4048,6 +4048,30 @@ spec:
                       If enabled, this prevents pods of each microservice from being scheduled on the same node.
                       If another podAntiAffinity term is defined (either globally or locally for a specific microservice), this will be ignored.
                     type: boolean
+                  reservationGpuResourceName:
+                    description: |-
+                      ReservationGpuResourceName overrides the resource key the reservation pod requests for a
+                      whole GPU (only used when ReservationSchedulerName is set). Empty defaults to
+                      "nvidia.com/gpu"; set it to "deviceclass.resource.kubernetes.io/gpu.nvidia.com" to request
+                      a DRA-backed extended resource that slurm-bridge accepts and Slurm accounts.
+                    type: string
+                  reservationPodAnnotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      ReservationPodAnnotations are extra annotations stamped onto externally-scheduled
+                      reservation pods (only used when ReservationSchedulerName is set), e.g. the
+                      slurmjob.slinky.slurm.net/{qos,exclusive} annotations slurm-bridge requires to build a
+                      Slurm job. Ignored in the default pinned mode.
+                    type: object
+                  reservationSchedulerName:
+                    description: |-
+                      ReservationSchedulerName, when set, makes the binder create GPU-sharing reservation
+                      pods with this `spec.schedulerName` (instead of pre-binding them via `spec.nodeName`),
+                      so an external scheduler (e.g. slurm-bridge-scheduler) places the whole-GPU reservation
+                      pod and KAI only sub-divides fractions onto it. Empty/nil preserves the default behavior
+                      where the binder pins the reservation pod to the scheduler-selected node.
+                    type: string
                   schedulerName:
                     description: |-
                       SchedulerName specifies the name of the KAI scheduler. Pods must set this value

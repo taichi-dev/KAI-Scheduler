@@ -36,6 +36,9 @@ type Options struct {
 	FakeGPUNodes                                bool
 	Plugins                                     flags.JSONFlag[binderplugins.Config]
 	RuntimeClassName                            string
+	ReservationSchedulerName                    string
+	ReservationGpuResourceName                  string
+	ReservationPodAnnotations                   map[string]string
 }
 
 func InitOptions(fs *pflag.FlagSet) *Options {
@@ -109,6 +112,19 @@ func InitOptions(fs *pflag.FlagSet) *Options {
 	fs.StringVar(&options.RuntimeClassName,
 		"runtime-class-name", "",
 		"Runtime class for GPU reservation pods. Defaults to empty (no runtime class).")
+	fs.StringVar(&options.ReservationSchedulerName,
+		"reservation-scheduler-name", "",
+		"When set, reservation pods are created unbound with this spec.schedulerName so an "+
+			"external scheduler (e.g. slurm-bridge-scheduler) places them, instead of being "+
+			"pre-bound to the scheduler-selected node. Empty keeps the default pinned behavior.")
+	fs.StringVar(&options.ReservationGpuResourceName,
+		"reservation-gpu-resource-name", "",
+		"Resource key the reservation pod requests for a whole GPU in external mode. "+
+			"Empty defaults to nvidia.com/gpu; e.g. deviceclass.resource.kubernetes.io/gpu.nvidia.com.")
+	fs.StringToStringVar(&options.ReservationPodAnnotations,
+		"reservation-pod-annotations", nil,
+		"Extra annotations to stamp on externally-scheduled reservation pods (k=v,k2=v2), "+
+			"e.g. the slurmjob.slinky.slurm.net/{qos,exclusive} annotations slurm-bridge requires.")
 
 	utilfeature.DefaultMutableFeatureGate.AddFlag(fs)
 

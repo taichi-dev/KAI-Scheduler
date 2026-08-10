@@ -275,6 +275,23 @@ func (in *GlobalConfig) DeepCopyInto(out *GlobalConfig) {
 		*out = new(string)
 		**out = **in
 	}
+	if in.ReservationSchedulerName != nil {
+		in, out := &in.ReservationSchedulerName, &out.ReservationSchedulerName
+		*out = new(string)
+		**out = **in
+	}
+	if in.ReservationPodAnnotations != nil {
+		in, out := &in.ReservationPodAnnotations, &out.ReservationPodAnnotations
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
+	if in.ReservationGpuResourceName != nil {
+		in, out := &in.ReservationGpuResourceName, &out.ReservationGpuResourceName
+		*out = new(string)
+		**out = **in
+	}
 	if in.NodePoolLabelKey != nil {
 		in, out := &in.NodePoolLabelKey, &out.NodePoolLabelKey
 		*out = new(string)
