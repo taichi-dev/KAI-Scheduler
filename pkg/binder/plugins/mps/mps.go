@@ -90,18 +90,36 @@ func (p *Plugin) PreBind(
 
 	pipeDir := mps.PipeDir(p.baseDir, gpuGroup)
 	memValue := mps.PinnedDeviceMemLimitValue(memLimitMib)
-	activeThreadPercentage := p.activeThreadPercentage
+
+	// Determine CUDA_MPS_ACTIVE_THREAD_PERCENTAGE with per-pod precedence:
+	//   1. explicit gpu-sm-percent annotation -> always honored (decouples SM%
+	//      from the VRAM fraction), regardless of the global flag; an invalid
+	//      value fails the bind loudly rather than being silently ignored;
+	//   2. else the portion-derived value when the activeThreadPercentage flag
+	//      is on;
+	//   3. else leave the key unset.
+	smPercentValue := ""
+	if raw, ok := pod.Annotations[constants.GpuSmPercent]; ok {
+		pct, err := mps.ParseActiveThreadPercentage(raw)
+		if err != nil {
+			return fmt.Errorf("pod %s/%s has invalid %s annotation: %w",
+				pod.Namespace, pod.Name, constants.GpuSmPercent, err)
+		}
+		smPercentValue = mps.ActiveThreadPercentageValueFromPercent(pct)
+	} else if p.activeThreadPercentage {
+		smPercentValue = mps.ActiveThreadPercentageValue(portion)
+	}
 
 	log.FromContext(ctx).Info("configuring MPS for fraction pod",
 		"namespace", pod.Namespace, "name", pod.Name, "gpuGroup", gpuGroup,
-		"pipeDir", pipeDir, "pinnedMemLimit", memValue)
+		"pipeDir", pipeDir, "pinnedMemLimit", memValue, "activeThreadPercentage", smPercentValue)
 
 	return common.UpdateConfigMapEnvironmentVariable(ctx, p.kubeClient, pod, capabilitiesConfigMapName,
 		func(data map[string]string) error {
 			data[mps.PipeDirectoryEnvVar] = pipeDir
 			data[mps.PinnedDeviceMemLimitEnvVar] = memValue
-			if activeThreadPercentage {
-				data[mps.ActiveThreadPercentageEnvVar] = mps.ActiveThreadPercentageValue(portion)
+			if smPercentValue != "" {
+				data[mps.ActiveThreadPercentageEnvVar] = smPercentValue
 			}
 			return nil
 		})

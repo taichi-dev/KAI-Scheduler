@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -92,6 +93,14 @@ func PinnedDeviceMemLimitValue(mib int64) string {
 // percentage string clamped to [1,100].
 func ActiveThreadPercentageValue(portion float64) string {
 	pct := int(math.Round(portion * 100))
+	return ActiveThreadPercentageValueFromPercent(pct)
+}
+
+// ActiveThreadPercentageValueFromPercent formats an explicit SM percentage as
+// the CUDA_MPS_ACTIVE_THREAD_PERCENTAGE value, clamped to [1,100] to mirror
+// ActiveThreadPercentageValue. Used for the per-pod gpu-sm-percent path where
+// the SM% is decoupled from the VRAM fraction.
+func ActiveThreadPercentageValueFromPercent(pct int) string {
 	if pct < 1 {
 		pct = 1
 	}
@@ -99,6 +108,21 @@ func ActiveThreadPercentageValue(portion float64) string {
 		pct = 100
 	}
 	return fmt.Sprintf("%d", pct)
+}
+
+// ParseActiveThreadPercentage parses a per-pod gpu-sm-percent annotation value:
+// a base-10 integer that must fall in [1,100]. It returns an error for a
+// non-integer or out-of-range value so an explicit but malformed request fails
+// loudly rather than being silently ignored.
+func ParseActiveThreadPercentage(s string) (int, error) {
+	pct, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return 0, fmt.Errorf("active thread percentage %q must be an integer", s)
+	}
+	if pct < 1 || pct > 100 {
+		return 0, fmt.Errorf("active thread percentage %d must be in [1,100]", pct)
+	}
+	return pct, nil
 }
 
 // sanitizeSegment defends the path against a gpu-group value that (against the

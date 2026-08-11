@@ -62,6 +62,48 @@ func TestActiveThreadPercentageValue(t *testing.T) {
 	}
 }
 
+func TestActiveThreadPercentageValueFromPercent(t *testing.T) {
+	cases := map[int]string{
+		80:  "80",
+		25:  "25",
+		1:   "1",
+		100: "100",
+		0:   "1",   // clamp floor
+		-5:  "1",   // clamp floor
+		150: "100", // clamp ceiling
+	}
+	for pct, want := range cases {
+		if got := ActiveThreadPercentageValueFromPercent(pct); got != want {
+			t.Errorf("ActiveThreadPercentageValueFromPercent(%d) = %q, want %q", pct, got, want)
+		}
+	}
+}
+
+func TestParseActiveThreadPercentage(t *testing.T) {
+	valid := map[string]int{
+		"1":    1,
+		"80":   80,
+		"100":  100,
+		" 50 ": 50, // surrounding whitespace tolerated
+	}
+	for in, want := range valid {
+		got, err := ParseActiveThreadPercentage(in)
+		if err != nil {
+			t.Errorf("ParseActiveThreadPercentage(%q) unexpected error: %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("ParseActiveThreadPercentage(%q) = %d, want %d", in, got, want)
+		}
+	}
+
+	for _, in := range []string{"", "abc", "0", "-1", "101", "150", "50.5", "50%"} {
+		if _, err := ParseActiveThreadPercentage(in); err == nil {
+			t.Errorf("ParseActiveThreadPercentage(%q) expected error, got nil", in)
+		}
+	}
+}
+
 func containsDotDot(s string) bool {
 	for i := 0; i+1 < len(s); i++ {
 		if s[i] == '.' && s[i+1] == '.' {

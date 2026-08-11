@@ -51,14 +51,17 @@ const (
 	TopOwnerMetadataKey = "kai.scheduler/top-owner-metadata"
 
 	// Annotations
-	PodGroupAnnotationForPod      = "pod-group-name"
-	SkipPodGrouperAnnotation      = "kai.scheduler/skip-podgrouper"
-	GpuFraction                   = "gpu-fraction"
-	GpuFractionContainerName      = "gpu-fraction-container-name"
-	GpuMemory                     = "gpu-memory"
-	ReceivedResourceType          = "received-resource-type"
-	GpuFractionsNumDevices        = "gpu-fraction-num-devices"
-	MpsAnnotation                 = "mps"
+	PodGroupAnnotationForPod = "pod-group-name"
+	SkipPodGrouperAnnotation = "kai.scheduler/skip-podgrouper"
+	GpuFraction              = "gpu-fraction"
+	GpuFractionContainerName = "gpu-fraction-container-name"
+	GpuMemory                = "gpu-memory"
+	ReceivedResourceType     = "received-resource-type"
+	GpuFractionsNumDevices   = "gpu-fraction-num-devices"
+	MpsAnnotation            = "mps"
+	// GpuSmPercent sets a fraction pod's MPS active-thread (SM) percentage
+	// independently of its gpu-fraction/gpu-memory VRAM request. Integer 1-100.
+	GpuSmPercent                  = "gpu-sm-percent"
 	StalePodgroupTimeStamp        = "kai.scheduler/stale-podgroup-timestamp"
 	LastStartTimeStamp            = "kai.scheduler/last-start-timestamp"
 	LastEvictionTimeStamp         = "kai.scheduler/last-eviction-timestamp"

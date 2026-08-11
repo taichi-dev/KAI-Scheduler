@@ -13,6 +13,8 @@
 package mps
 
 import (
+	"fmt"
+
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 
@@ -33,7 +35,15 @@ func (p *MPS) Name() string {
 	return "mps"
 }
 
-func (p *MPS) Validate(_ *v1.Pod) error {
+// Validate rejects an invalid gpu-sm-percent annotation early, so a malformed
+// explicit SM% request is caught at admission rather than only failing the bind
+// loop later. A pod that omits the annotation is unaffected.
+func (p *MPS) Validate(pod *v1.Pod) error {
+	if raw, ok := pod.Annotations[constants.GpuSmPercent]; ok {
+		if _, err := mps.ParseActiveThreadPercentage(raw); err != nil {
+			return fmt.Errorf("invalid %s annotation: %w", constants.GpuSmPercent, err)
+		}
+	}
 	return nil
 }
 

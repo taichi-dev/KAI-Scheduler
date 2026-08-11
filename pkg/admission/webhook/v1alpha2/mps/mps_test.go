@@ -129,6 +129,36 @@ func TestMutateIdempotent(t *testing.T) {
 	}
 }
 
+func TestValidateSmPercent(t *testing.T) {
+	tests := []struct {
+		name        string
+		smPercent   string
+		present     bool
+		expectError bool
+	}{
+		{name: "no annotation ok", present: false},
+		{name: "valid value ok", present: true, smPercent: "80"},
+		{name: "non-integer errors", present: true, smPercent: "abc", expectError: true},
+		{name: "out of range errors", present: true, smPercent: "150", expectError: true},
+		{name: "empty errors", present: true, smPercent: "", expectError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ann := map[string]string{constants.GpuFraction: "0.5", constants.MpsAnnotation: "true"}
+			if tt.present {
+				ann[constants.GpuSmPercent] = tt.smPercent
+			}
+			err := New().Validate(fractionPod(ann))
+			if tt.expectError && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tt.expectError && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func assertOptionalConfigMapEnv(t *testing.T, pod *v1.Pod, name string) {
 	t.Helper()
 	for _, e := range pod.Spec.Containers[0].Env {
