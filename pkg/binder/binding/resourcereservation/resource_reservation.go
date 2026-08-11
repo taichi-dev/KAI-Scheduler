@@ -28,6 +28,7 @@ import (
 	schedulingv1alpha2 "github.com/kai-scheduler/KAI-scheduler/pkg/apis/scheduling/v1alpha2"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/binder/binding/resourcereservation/group_mutex"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/common/constants"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/common/mps"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/common/resources"
 )
 
@@ -96,6 +97,8 @@ type service struct {
 	reservationSchedulerName            string
 	reservationGpuResourceName          string
 	reservationPodAnnotations           map[string]string
+	mpsEnabled                          bool
+	mpsBaseDir                          string
 }
 
 func NewService(
@@ -138,6 +141,22 @@ func (rsc *service) WithExternalReservation(schedulerName, gpuResourceName strin
 	rsc.reservationSchedulerName = schedulerName
 	rsc.reservationGpuResourceName = gpuResourceName
 	rsc.reservationPodAnnotations = podAnnotations
+	return rsc
+}
+
+// WithMPS makes each reservation pod also host a per-GPU nvidia-cuda-mps-control
+// daemon (the reservation pod already holds the whole physical GPU and its
+// lifecycle equals "this GPU is in fractional use"). The daemon serves the
+// fraction (client) pods that share the GPU; a shared hostPath under baseDir
+// carries the MPS pipe/log directory keyed by gpu-group. Passing an empty
+// baseDir uses the default. Reservation pods themselves do NOT become MPS
+// clients — they keep using the device directly.
+func (rsc *service) WithMPS(baseDir string) *service {
+	rsc.mpsEnabled = true
+	if baseDir == "" {
+		baseDir = mps.DefaultBaseDir
+	}
+	rsc.mpsBaseDir = baseDir
 	return rsc
 }
 
@@ -792,12 +811,53 @@ func (rsc *service) createResourceReservationPod(
 		}
 	}
 
+	if rsc.mpsEnabled {
+		rsc.applyMPSHosting(podSpec, gpuGroup)
+	}
+
 	if rsc.fakeGPuNodes {
 		podSpec.Spec.Containers[0].Image = "ubuntu"
 		podSpec.Spec.Containers[0].Args = []string{"sleep", "infinity"}
 	}
 
 	return podSpec, rsc.kubeClient.Create(context.Background(), podSpec)
+}
+
+// applyMPSHosting wires the reservation pod to host the per-GPU MPS control
+// daemon: a hostPath mount of the node-local MPS base directory, plus the env
+// the reservation entrypoint reads to start nvidia-cuda-mps-control for this
+// gpu-group. The reservation pod's own workload uses the GPU directly (it only
+// runs NVML discovery); it never sets CUDA_MPS_PIPE_DIRECTORY for itself, so it
+// is not an MPS client.
+func (rsc *service) applyMPSHosting(podSpec *v1.Pod, gpuGroup string) {
+	hostPathType := v1.HostPathDirectoryOrCreate
+	podSpec.Spec.Volumes = append(podSpec.Spec.Volumes, v1.Volume{
+		Name: mps.VolumeName,
+		VolumeSource: v1.VolumeSource{
+			HostPath: &v1.HostPathVolumeSource{
+				Path: rsc.mpsBaseDir,
+				Type: &hostPathType,
+			},
+		},
+	})
+
+	container := &podSpec.Spec.Containers[0]
+	container.VolumeMounts = append(container.VolumeMounts, v1.VolumeMount{
+		Name:      mps.VolumeName,
+		MountPath: rsc.mpsBaseDir,
+	})
+	container.Env = append(container.Env,
+		v1.EnvVar{Name: "KAI_MPS_ENABLED", Value: "true"},
+		v1.EnvVar{Name: "KAI_MPS_BASE_DIR", Value: rsc.mpsBaseDir},
+		// Ensure the NVIDIA container runtime exposes the MPS control/server
+		// binaries and compute libraries in the reservation container.
+		v1.EnvVar{Name: "NVIDIA_DRIVER_CAPABILITIES", Value: "compute,utility"},
+		v1.EnvVar{Name: "GPU_GROUP", ValueFrom: &v1.EnvVarSource{
+			FieldRef: &v1.ObjectFieldSelector{
+				FieldPath: fmt.Sprintf("metadata.labels['%s']", constants.GPUGroup),
+			},
+		}},
+	)
 }
 
 func (rsc *service) isScalingUp(ctx context.Context) bool {

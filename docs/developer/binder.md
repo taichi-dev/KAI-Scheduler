@@ -122,6 +122,7 @@ The current default binder plugins are:
 | `dynamicresources` | 200 | `bindTimeoutSeconds: "120"` | Handles Kubernetes Dynamic Resource Allocation claim binding before pod bind. |
 | `gpusharing` | 100 | `cdiEnabled: "false"` | Handles fractional GPU pod mutation needed for GPU sharing. |
 | `hamicore` | 50 |  | Optional HAMI-core GPU virtualization for fractional GPU pods. Depends on `gpusharing`. Disabled by default. |
+| `mps` | 40 | `baseDir: "/var/run/kai-scheduler/mps"`, `activeThreadPercentage: "false"` | Optional MPS-based VRAM enforcement for fractional GPU pods. Depends on `gpusharing`. Disabled by default. |
 
 For operator-managed deployments, the operator sets the `gpusharing` `cdiEnabled` argument from `spec.binder.cdiEnabled`. If `spec.binder.cdiEnabled` is unset, the operator attempts to auto-detect CDI from the NVIDIA GPU Operator `ClusterPolicy`. Enable `hamicore` to opt into HAMI-core GPU memory limits.
 
@@ -235,6 +236,17 @@ The HAMI-core plugin is disabled by default and **requires `gpusharing` to be en
 Fractional pods created while `hamicore` is disabled do not receive this environment variable. Enabling `hamicore` affects only pods admitted after the change.
 
 Setting `CUDA_DEVICE_MEMORY_LIMIT` does not by itself enforce memory inside the container. For enforcement, deploy [KAI-resource-isolator](https://github.com/Project-HAMi/KAI-resource-isolator) alongside KAI Scheduler so HAMi-core can apply the limit at runtime. See [GPU Sharing — Enforcing GPU memory limits](../gpu-sharing/README.md#enforcing-gpu-memory-limits-optional).
+
+#### MPS Plugin
+
+The MPS plugin is disabled by default and **requires `gpusharing` to be enabled**. It enforces the VRAM limit for fractional GPU pods at runtime using NVIDIA MPS (`CUDA_MPS_PINNED_DEVICE_MEM_LIMIT`), rather than an LD_PRELOAD shim as HAMI-core does. Like HAMI-core it is split across admission and binder:
+
+| Component | Responsibility |
+| --- | --- |
+| Admission `mps` | For fraction pods that opt in (annotation `mps: "true"`), injects `CUDA_MPS_PIPE_DIRECTORY`, `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT`, and `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` (ConfigMapKeyRef into the shared-gpu capabilities ConfigMap, optional) and mounts the hostPath MPS pipe/log base directory. Enabled with `--mps-enabled=true`. |
+| Binder `mps` | At PreBind, writes the pipe directory (keyed by the assigned `runai-gpu-group`) and the memory limit (`receivedGPU.portion` × node `nvidia.com/gpu.memory`) into that ConfigMap. |
+
+Only fraction pods carrying `mps: "true"` are affected; reservation, Slurm, and whole-GPU pods never receive MPS env and keep using the device directly. The per-GPU `nvidia-cuda-mps-control` daemon is hosted by the GPU reservation pod (`--reservation-mps-enabled` on the binder), whose lifecycle equals "this GPU is in fractional use". GPU compute mode is left at DEFAULT so that MPS remains strictly opt-in per client.
 
 ### Creating Custom Plugins
 

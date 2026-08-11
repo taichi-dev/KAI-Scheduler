@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/kai-scheduler/KAI-scheduler/pkg/resourcereservation/discovery"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/resourcereservation/mps"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/resourcereservation/patcher"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/resourcereservation/poddetails"
 )
@@ -72,6 +73,23 @@ func Run(ctx context.Context) error {
 		logger.Info("Pod was updated with GPU device UUID")
 	}
 
+	// When this reservation pod is designated an MPS host (env injected by the
+	// binder), start the per-GPU nvidia-cuda-mps-control daemon before idling.
+	// The daemon serves the fraction pods sharing this physical GPU. This pod's
+	// own process is not an MPS client (it never sets CUDA_MPS_PIPE_DIRECTORY
+	// for itself), so it keeps using the device directly.
+	mpsCfg := mps.ConfigFromEnv()
+	if err = mpsCfg.Validate(); err != nil {
+		return fmt.Errorf("invalid MPS host configuration: %v", err)
+	}
+	var mpsManager *mps.Manager
+	if mpsCfg.Enabled {
+		mpsManager = mps.NewManager(mpsCfg)
+		if err = mpsManager.Start(ctx); err != nil {
+			return fmt.Errorf("could not start MPS control daemon: %v", err)
+		}
+	}
+
 	mgr, err := ctrl.NewManager(kubeConfig, ctrl.Options{Scheme: scheme})
 	if err != nil {
 		return err
@@ -80,6 +98,12 @@ func Run(ctx context.Context) error {
 	if err = mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		logger.Error(err, "problem running manager")
 		return err
+	}
+
+	if mpsManager != nil {
+		if stopErr := mpsManager.Stop(ctx); stopErr != nil {
+			logger.Error(stopErr, "failed to stop MPS control daemon on shutdown")
+		}
 	}
 	return nil
 }

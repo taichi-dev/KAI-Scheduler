@@ -23,12 +23,21 @@ const (
 	DynamicResourcesPluginName = "dynamicresources"
 	GPUSharingPluginName       = "gpusharing"
 	HamiCorePluginName         = "hamicore"
+	MPSPluginName              = "mps"
 
 	BindTimeoutSecondsArgument = "bindTimeoutSeconds"
 	CDIEnabledArgument         = "cdiEnabled"
+	// MPSBaseDirArgument is the node-local base directory shared (hostPath)
+	// between the MPS control daemon and the fraction (client) pods.
+	MPSBaseDirArgument = "baseDir"
+	// MPSActiveThreadPercentageArgument enables optional SM% enforcement via
+	// CUDA_MPS_ACTIVE_THREAD_PERCENTAGE proportional to the GPU fraction.
+	MPSActiveThreadPercentageArgument = "activeThreadPercentage"
 
-	DefaultBindTimeoutSeconds = 120
-	DefaultCDIEnabled         = false
+	DefaultBindTimeoutSeconds        = 120
+	DefaultCDIEnabled                = false
+	DefaultMPSBaseDir                = "/var/run/kai-scheduler/mps"
+	DefaultMPSActiveThreadPercentage = false
 )
 
 var defaultPluginPriorities = map[string]int{
@@ -36,6 +45,7 @@ var defaultPluginPriorities = map[string]int{
 	DynamicResourcesPluginName: 200,
 	GPUSharingPluginName:       100,
 	HamiCorePluginName:         50,
+	MPSPluginName:              40,
 }
 
 // PluginConfig allows overriding binder plugin settings.
@@ -201,6 +211,14 @@ func DefaultPluginsConfig(bindTimeoutSeconds int, cdiEnabled bool) map[string]Pl
 		HamiCorePluginName: {
 			Enabled:  ptr.To(false),
 			Priority: ptr.To(defaultPluginPriorities[HamiCorePluginName]),
+		},
+		MPSPluginName: {
+			Enabled:  ptr.To(false),
+			Priority: ptr.To(defaultPluginPriorities[MPSPluginName]),
+			Arguments: map[string]string{
+				MPSBaseDirArgument:                DefaultMPSBaseDir,
+				MPSActiveThreadPercentageArgument: strconv.FormatBool(DefaultMPSActiveThreadPercentage),
+			},
 		},
 	}
 }

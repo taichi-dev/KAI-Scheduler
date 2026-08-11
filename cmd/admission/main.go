@@ -14,6 +14,7 @@ import (
 	"github.com/kai-scheduler/KAI-scheduler/pkg/admission/webhook/v1alpha2/deviceaccess"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/admission/webhook/v1alpha2/gpusharing"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/admission/webhook/v1alpha2/hamicore"
+	mpsadmission "github.com/kai-scheduler/KAI-scheduler/pkg/admission/webhook/v1alpha2/mps"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/admission/webhook/v1alpha2/runtimeenforcement"
 )
 
@@ -49,6 +50,12 @@ func registerPlugins(app *app.App) error {
 
 	if app.Options.HamiCoreEnabled {
 		admissionPlugins.RegisterPlugin(hamicore.New())
+	}
+
+	// Registered after gpusharing (above), which sets the shared-gpu ConfigMap
+	// annotation this plugin reads.
+	if app.Options.MPSEnabled {
+		admissionPlugins.RegisterPlugin(mpsadmission.New())
 	}
 
 	if app.Options.BlockNvidiaVisibleDevices {

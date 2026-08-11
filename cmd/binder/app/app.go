@@ -118,6 +118,9 @@ func New(options *Options, config *rest.Config) (*App, error) {
 		rrs = rrs.WithExternalReservation(options.ReservationSchedulerName,
 			options.ReservationGpuResourceName, options.ReservationPodAnnotations)
 	}
+	if options.ReservationMPSEnabled {
+		rrs = rrs.WithMPS(options.ReservationMPSBaseDir)
+	}
 
 	reconcilerParams := &controllers.ReconcilerParams{
 		MaxConcurrentReconciles:     options.MaxConcurrentReconciles,

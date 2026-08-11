@@ -402,6 +402,10 @@ func buildArgsList(kaiConfig *kaiv1.Config, config *kaiv1admission.Admission) []
 		args = append(args, "--hami-core-enabled=true")
 	}
 
+	if isMPSEnabled(kaiConfig) {
+		args = append(args, "--mps-enabled=true")
+	}
+
 	if config.BlockNvidiaVisibleDevices != nil && *config.BlockNvidiaVisibleDevices {
 		args = append(args, "--block-nvidia-visible-devices=true")
 	}
@@ -426,6 +430,17 @@ func isHamiCoreEnabled(kaiConfig *kaiv1.Config) bool {
 		return false
 	}
 	pluginCfg, found := kaiConfig.Spec.Binder.Plugins[kaiv1binder.HamiCorePluginName]
+	if !found {
+		return false
+	}
+	return ptr.Deref(pluginCfg.Enabled, false)
+}
+
+func isMPSEnabled(kaiConfig *kaiv1.Config) bool {
+	if kaiConfig.Spec.Binder == nil {
+		return false
+	}
+	pluginCfg, found := kaiConfig.Spec.Binder.Plugins[kaiv1binder.MPSPluginName]
 	if !found {
 		return false
 	}

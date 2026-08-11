@@ -16,6 +16,7 @@ import (
 	"github.com/kai-scheduler/KAI-scheduler/pkg/binder/plugins/gpusharing"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/binder/plugins/hamicore"
 	k8splugins "github.com/kai-scheduler/KAI-scheduler/pkg/binder/plugins/k8s-plugins"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/binder/plugins/mps"
 )
 
 type PluginBuildContext struct {
@@ -51,6 +52,7 @@ func InitDefaultPlugins() {
 	RegisterPluginBuilder(DynamicResourcesPluginName, newDynamicResourcesPlugin)
 	RegisterPluginBuilder(GPUSharingPluginName, newGPUSharingPlugin)
 	RegisterPluginBuilder(HamiCorePluginName, newHamiCorePlugin)
+	RegisterPluginBuilder(MPSPluginName, newMPSPlugin)
 }
 
 func BuildConfiguredPlugins(buildContext PluginBuildContext, config Config) (*BinderPlugins, error) {
@@ -112,25 +114,50 @@ func newHamiCorePlugin(buildContext PluginBuildContext, _ map[string]string) (Pl
 	return hamicore.New(buildContext.KubeClient), nil
 }
 
+func newMPSPlugin(buildContext PluginBuildContext, arguments map[string]string) (Plugin, error) {
+	baseDir := arguments[MPSBaseDirArgument]
+	activeThreadPercentage := false
+	if raw, found := arguments[MPSActiveThreadPercentageArgument]; found && raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid argument %q=%q: %w", MPSActiveThreadPercentageArgument, raw, err)
+		}
+		activeThreadPercentage = parsed
+	}
+	return mps.New(buildContext.KubeClient, baseDir, activeThreadPercentage), nil
+}
+
 func validateDependentPlugins(config Config) error {
-	hamiCoreCfg, hamiCoreFound := config[HamiCorePluginName]
-	if !hamiCoreFound || (hamiCoreCfg.Enabled != nil && !*hamiCoreCfg.Enabled) {
+	// Both hamicore and mps write into the shared-gpu ConfigMap that the
+	// gpusharing plugin creates, so each requires gpusharing to be enabled and
+	// to run before it (higher priority).
+	for _, dependent := range []string{HamiCorePluginName, MPSPluginName} {
+		if err := validateRequiresGPUSharing(config, dependent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateRequiresGPUSharing(config Config, dependent string) error {
+	dependentCfg, found := config[dependent]
+	if !found || (dependentCfg.Enabled != nil && !*dependentCfg.Enabled) {
 		return nil
 	}
 
 	gpuSharingCfg, gpuSharingFound := config[GPUSharingPluginName]
 	if !gpuSharingFound || (gpuSharingCfg.Enabled != nil && !*gpuSharingCfg.Enabled) {
-		return fmt.Errorf("%q plugin requires %q plugin to be enabled", HamiCorePluginName, GPUSharingPluginName)
+		return fmt.Errorf("%q plugin requires %q plugin to be enabled", dependent, GPUSharingPluginName)
 	}
 
 	// PreBind is invoked in EnabledOptions() order (higher priority first).
-	// hamicore requires gpusharing to have already created the configmap.
-	hamiCorePri := ptr.Deref(config[HamiCorePluginName].Priority, 0)
+	// The dependent plugin requires gpusharing to have already created the configmap.
+	dependentPri := ptr.Deref(config[dependent].Priority, 0)
 	gpuSharingPri := ptr.Deref(config[GPUSharingPluginName].Priority, 0)
-	if gpuSharingPri <= hamiCorePri {
+	if gpuSharingPri <= dependentPri {
 		return fmt.Errorf("%q plugin requires %q to run before it (expected %q.priority > %q.priority, got %d <= %d)",
-			HamiCorePluginName, GPUSharingPluginName, GPUSharingPluginName, HamiCorePluginName,
-			gpuSharingPri, hamiCorePri)
+			dependent, GPUSharingPluginName, GPUSharingPluginName, dependent,
+			gpuSharingPri, dependentPri)
 	}
 
 	return nil

@@ -12,6 +12,7 @@ import (
 	binderplugins "github.com/kai-scheduler/KAI-scheduler/pkg/binder/plugins"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/common/constants"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/common/flags"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/common/mps"
 )
 
 type Options struct {
@@ -39,6 +40,8 @@ type Options struct {
 	ReservationSchedulerName                    string
 	ReservationGpuResourceName                  string
 	ReservationPodAnnotations                   map[string]string
+	ReservationMPSEnabled                       bool
+	ReservationMPSBaseDir                       string
 }
 
 func InitOptions(fs *pflag.FlagSet) *Options {
@@ -125,6 +128,15 @@ func InitOptions(fs *pflag.FlagSet) *Options {
 		"reservation-pod-annotations", nil,
 		"Extra annotations to stamp on externally-scheduled reservation pods (k=v,k2=v2), "+
 			"e.g. the slurmjob.slinky.slurm.net/{qos,exclusive} annotations slurm-bridge requires.")
+	fs.BoolVar(&options.ReservationMPSEnabled,
+		"reservation-mps-enabled", false,
+		"When set, each GPU reservation pod also hosts an nvidia-cuda-mps-control daemon for "+
+			"the fraction pods sharing its GPU (VRAM enforcement via MPS). Opt-in per fraction pod "+
+			"via the 'mps: \"true\"' annotation.")
+	fs.StringVar(&options.ReservationMPSBaseDir,
+		"reservation-mps-base-dir", mps.DefaultBaseDir,
+		"Node-local base directory (hostPath) shared between the MPS control daemon and the "+
+			"fraction (client) pods. Must match the mps binder plugin's baseDir argument.")
 
 	utilfeature.DefaultMutableFeatureGate.AddFlag(fs)
 
