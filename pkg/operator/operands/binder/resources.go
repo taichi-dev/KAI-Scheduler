@@ -263,6 +263,12 @@ func buildArgsList(kaiConfig *kaiv1.Config, config *kaiv1binder.Binder, fakeGPU 
 	}
 	args = append(args, "--plugins", string(pluginsJSON))
 
+	// When the mps binder plugin is enabled, reservation pods must also host the
+	// per-GPU MPS control daemon that its fraction (client) pods connect to.
+	if isMPSPluginEnabled(config) {
+		args = append(args, "--reservation-mps-enabled")
+	}
+
 	if fakeGPU {
 		args = append(args, "--fake-gpu-nodes")
 	}
@@ -317,6 +323,18 @@ func buildArgsList(kaiConfig *kaiv1.Config, config *kaiv1binder.Binder, fakeGPU 
 	}
 
 	return args, nil
+}
+
+// isMPSPluginEnabled reports whether the mps binder plugin is enabled in config.
+func isMPSPluginEnabled(config *kaiv1binder.Binder) bool {
+	if config == nil {
+		return false
+	}
+	pluginCfg, found := config.Plugins[kaiv1binder.MPSPluginName]
+	if !found {
+		return false
+	}
+	return pluginCfg.Enabled != nil && *pluginCfg.Enabled
 }
 
 // resolveCDIEnabled fills the gpusharing cdiEnabled plugin argument when it

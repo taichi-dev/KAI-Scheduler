@@ -32,10 +32,15 @@ var _ = Describe("Binder", func() {
 		Expect(binder.Service.Resources.Requests[v1.ResourceMemory]).To(Equal(resource.MustParse("200Mi")))
 		Expect(binder.Service.Resources.Limits[v1.ResourceCPU]).To(Equal(resource.MustParse("100m")))
 		Expect(binder.Service.Resources.Limits[v1.ResourceMemory]).To(Equal(resource.MustParse("200Mi")))
-		Expect(binder.Plugins).To(HaveLen(4))
+		Expect(binder.Plugins).To(HaveLen(5))
 		Expect(*binder.Plugins[VolumeBindingPluginName].Priority).To(Equal(defaultPluginPriorities[VolumeBindingPluginName]))
 		Expect(*binder.Plugins[DynamicResourcesPluginName].Priority).To(Equal(defaultPluginPriorities[DynamicResourcesPluginName]))
 		Expect(*binder.Plugins[GPUSharingPluginName].Priority).To(Equal(defaultPluginPriorities[GPUSharingPluginName]))
+		// mps plugin defaults: disabled, runs after gpusharing (lower priority).
+		Expect(binder.Plugins[MPSPluginName].Enabled).NotTo(BeNil())
+		Expect(*binder.Plugins[MPSPluginName].Enabled).To(BeFalse())
+		Expect(*binder.Plugins[MPSPluginName].Priority).To(Equal(defaultPluginPriorities[MPSPluginName]))
+		Expect(*binder.Plugins[MPSPluginName].Priority).To(BeNumerically("<", *binder.Plugins[GPUSharingPluginName].Priority))
 		Expect(binder.Plugins[VolumeBindingPluginName].Arguments[BindTimeoutSecondsArgument]).
 			To(Equal(strconv.Itoa(DefaultBindTimeoutSeconds)))
 		Expect(binder.Plugins[DynamicResourcesPluginName].Arguments[BindTimeoutSecondsArgument]).

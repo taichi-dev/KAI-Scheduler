@@ -17,9 +17,12 @@ const (
 	DynamicResourcesPluginName = kaiv1binder.DynamicResourcesPluginName
 	GPUSharingPluginName       = kaiv1binder.GPUSharingPluginName
 	HamiCorePluginName         = kaiv1binder.HamiCorePluginName
+	MPSPluginName              = kaiv1binder.MPSPluginName
 
-	BindTimeoutSecondsArgument = kaiv1binder.BindTimeoutSecondsArgument
-	CDIEnabledArgument         = kaiv1binder.CDIEnabledArgument
+	BindTimeoutSecondsArgument        = kaiv1binder.BindTimeoutSecondsArgument
+	CDIEnabledArgument                = kaiv1binder.CDIEnabledArgument
+	MPSBaseDirArgument                = kaiv1binder.MPSBaseDirArgument
+	MPSActiveThreadPercentageArgument = kaiv1binder.MPSActiveThreadPercentageArgument
 
 	DefaultBindTimeoutSeconds = kaiv1binder.DefaultBindTimeoutSeconds
 	DefaultCDIEnabled         = kaiv1binder.DefaultCDIEnabled
