@@ -1752,3 +1752,36 @@ func TestTimeoutAllocationIndicator(t *testing.T) {
 		})
 	}
 }
+
+func TestDeleteReservationPodStripsCascadeFinalizer(t *testing.T) {
+	const ns = "kai-resource-reservation"
+	resv := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "gpu-reservation-strip",
+			Namespace:  ns,
+			Finalizers: []string{ReservationCascadeFinalizer, "scheduler.slinky.slurm.net/finalizer"},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme).WithObjects(resv).Build()
+	rsc := &service{namespace: ns, kubeClient: c}
+
+	if err := rsc.deleteReservationPod(context.Background(), resv.DeepCopy()); err != nil {
+		t.Fatalf("deleteReservationPod: %v", err)
+	}
+
+	// slurm-bridge's finalizer still holds the object, so it should still exist — but OUR cascade
+	// finalizer must be gone, so the cascade controller will NOT treat this internal delete as a
+	// signal to delete the backed fractions.
+	got := &v1.Pod{}
+	if err := c.Get(context.Background(), runtimeClient.ObjectKey{Namespace: ns, Name: "gpu-reservation-strip"}, got); err != nil {
+		t.Fatalf("reservation should still exist while slurm-bridge finalizer holds it: %v", err)
+	}
+	for _, f := range got.Finalizers {
+		if f == ReservationCascadeFinalizer {
+			t.Errorf("cascade finalizer should have been stripped, got finalizers=%v", got.Finalizers)
+		}
+	}
+	if got.DeletionTimestamp == nil {
+		t.Errorf("reservation should be terminating (deletionTimestamp set) after internal delete")
+	}
+}

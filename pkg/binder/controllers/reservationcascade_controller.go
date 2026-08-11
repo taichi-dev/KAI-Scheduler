@@ -62,12 +62,9 @@ func (r *ReservationCascadeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	group := pod.Labels[constants.GPUGroup]
 
 	if pod.DeletionTimestamp.IsZero() {
-		// Defensive: ensure the finalizer is present (the binder normally stamps it at creation).
-		if group != "" && controllerutil.AddFinalizer(pod, resourcereservation.ReservationCascadeFinalizer) {
-			if err := r.Client.Update(ctx, pod); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
+		// Not being deleted — nothing to do. We deliberately do NOT (re-)add the finalizer here:
+		// the binder stamps it at creation, and re-adding it would race-undo the strip that the
+		// internal reservation deleter does to opt a system-initiated deletion out of cascading.
 		return ctrl.Result{}, nil
 	}
 

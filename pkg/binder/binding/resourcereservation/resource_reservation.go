@@ -545,6 +545,25 @@ func (rsc *service) deleteNonReservedPods(ctx context.Context, gpuGroup string, 
 
 func (rsc *service) deleteReservationPod(ctx context.Context, pod *v1.Pod) error {
 	logger := log.FromContext(ctx)
+	// This is the INTERNAL reservation deleter (reap-on-allocation-timeout, node-divergence
+	// guard, and orphan cleanup in syncForPods). Strip our cascade finalizer first so this
+	// system-initiated deletion does NOT cascade to the backed fraction workloads — otherwise a
+	// transient/racy internal reservation delete would kill healthy fractions. Only an EXTERNAL
+	// delete (which leaves the finalizer intact) should trigger the cascade.
+	if slices.Contains(pod.Finalizers, ReservationCascadeFinalizer) {
+		original := pod.DeepCopy()
+		kept := make([]string, 0, len(pod.Finalizers))
+		for _, f := range pod.Finalizers {
+			if f != ReservationCascadeFinalizer {
+				kept = append(kept, f)
+			}
+		}
+		pod.Finalizers = kept
+		if patchErr := rsc.kubeClient.Patch(ctx, pod, client.MergeFrom(original)); patchErr != nil &&
+			!apierrors.IsNotFound(patchErr) {
+			return fmt.Errorf("failed to strip cascade finalizer from reservation pod %s: %w", pod.Name, patchErr)
+		}
+	}
 	logger.Info("Deleting reservation pod", "name", pod.Name)
 	err := rsc.kubeClient.Delete(ctx,
 		pod,
