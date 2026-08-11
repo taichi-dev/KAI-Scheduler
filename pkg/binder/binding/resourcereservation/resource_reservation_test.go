@@ -1640,3 +1640,148 @@ var _ = Describe("Reservation pod duplicate gpu-group race", func() {
 func ptrBool(b bool) *bool { return &b }
 
 func ptrInt64(i int64) *int64 { return &i }
+
+var _ = Describe("External reservation mode", func() {
+	const (
+		extNode        = "kai-node"
+		extGroup       = "ext-gpu-group"
+		externalSched  = "slurm-bridge-scheduler"
+		draGpuResource = "deviceclass.resource.kubernetes.io/gpu.nvidia.com"
+	)
+
+	buildClient := func() runtimeClient.WithWatch {
+		return fake.NewClientBuilder().WithScheme(testScheme).
+			WithIndex(&v1.Pod{}, "spec.nodeName", nodeNameIndexer).Build()
+	}
+
+	It("creates an unbound reservation pod placed by the external scheduler with the DRA-backed GPU resource and configured annotations", func() {
+		rsc := initializeTestService(buildClient()).WithExternalReservation(
+			externalSched, draGpuResource,
+			map[string]string{
+				"slurmjob.slinky.slurm.net/qos":       "inference",
+				"slurmjob.slinky.slurm.net/exclusive": "false",
+			},
+		)
+
+		pod, err := rsc.createGPUReservationPod(context.TODO(), nil, extNode, extGroup)
+		Expect(err).To(Succeed())
+
+		// Unbound: an external scheduler (e.g. slurm-bridge) must place it, so no nodeName and no
+		// faked PodScheduled=True condition (which is what makes the default mode bypass scheduling).
+		Expect(pod.Spec.SchedulerName).To(Equal(externalSched))
+		Expect(pod.Spec.NodeName).To(BeEmpty())
+		Expect(pod.Status.Conditions).To(BeEmpty())
+
+		// Whole GPU is requested as the DRA-backed extended resource, not the classic device-plugin
+		// resource, so slurm-bridge accepts it and Slurm accounts it.
+		Expect(pod.Spec.Containers[0].Resources.Requests).To(HaveKey(v1.ResourceName(draGpuResource)))
+		Expect(pod.Spec.Containers[0].Resources.Limits).To(HaveKey(v1.ResourceName(draGpuResource)))
+		Expect(pod.Spec.Containers[0].Resources.Requests).ToNot(HaveKey(v1.ResourceName(constants.NvidiaGpuResource)))
+
+		// Configured annotations are stamped so slurm-bridge can build the Slurm job.
+		Expect(pod.Annotations).To(HaveKeyWithValue("slurmjob.slinky.slurm.net/qos", "inference"))
+		Expect(pod.Annotations).To(HaveKeyWithValue("slurmjob.slinky.slurm.net/exclusive", "false"))
+
+		// Name is keyed on the gpu-group only (no node at creation time), distinct from the pinned
+		// node-keyed name.
+		Expect(pod.Name).To(Equal(reservationPodName("", extGroup)))
+		Expect(pod.Name).ToNot(Equal(reservationPodName(extNode, extGroup)))
+	})
+
+	It("keeps the default pinned behavior when no external scheduler is configured", func() {
+		rsc := initializeTestService(buildClient())
+
+		pod, err := rsc.createGPUReservationPod(context.TODO(), nil, extNode, extGroup)
+		Expect(err).To(Succeed())
+
+		Expect(pod.Spec.SchedulerName).To(BeEmpty())
+		Expect(pod.Spec.NodeName).To(Equal(extNode))
+		Expect(pod.Status.Conditions).ToNot(BeEmpty())
+		Expect(pod.Spec.Containers[0].Resources.Requests).To(HaveKey(v1.ResourceName(constants.NvidiaGpuResource)))
+		Expect(pod.Name).To(Equal(reservationPodName(extNode, extGroup)))
+	})
+})
+
+func TestTimeoutAllocationIndicator(t *testing.T) {
+	const ns = "kai-resource-reservation"
+	const podName = "gpu-reservation-abc123"
+
+	newPod := func(phase v1.PodPhase) *v1.Pod {
+		return &v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: ns},
+			Status:     v1.PodStatus{Phase: phase},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		objects []runtimeClient.Object
+		want    string
+	}{
+		{
+			name:    "still pending -> parked",
+			objects: []runtimeClient.Object{newPod(v1.PodPending)},
+			want:    pendingGpuIndicator,
+		},
+		{
+			name:    "failed -> reap",
+			objects: []runtimeClient.Object{newPod(v1.PodFailed)},
+			want:    unknownGpuIndicator,
+		},
+		{
+			name:    "running-but-no-index -> reap",
+			objects: []runtimeClient.Object{newPod(v1.PodRunning)},
+			want:    unknownGpuIndicator,
+		},
+		{
+			name:    "not found -> reap",
+			objects: nil,
+			want:    unknownGpuIndicator,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rsc := &service{
+				namespace:  ns,
+				kubeClient: fake.NewClientBuilder().WithScheme(testScheme).WithObjects(tt.objects...).Build(),
+			}
+			if got := rsc.timeoutAllocationIndicator(context.Background(), podName); got != tt.want {
+				t.Errorf("timeoutAllocationIndicator = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDeleteReservationPodStripsCascadeFinalizer(t *testing.T) {
+	const ns = "kai-resource-reservation"
+	resv := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "gpu-reservation-strip",
+			Namespace:  ns,
+			Finalizers: []string{ReservationCascadeFinalizer, "scheduler.slinky.slurm.net/finalizer"},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme).WithObjects(resv).Build()
+	rsc := &service{namespace: ns, kubeClient: c}
+
+	if err := rsc.deleteReservationPod(context.Background(), resv.DeepCopy()); err != nil {
+		t.Fatalf("deleteReservationPod: %v", err)
+	}
+
+	// slurm-bridge's finalizer still holds the object, so it should still exist — but OUR cascade
+	// finalizer must be gone, so the cascade controller will NOT treat this internal delete as a
+	// signal to delete the backed fractions.
+	got := &v1.Pod{}
+	if err := c.Get(context.Background(), runtimeClient.ObjectKey{Namespace: ns, Name: "gpu-reservation-strip"}, got); err != nil {
+		t.Fatalf("reservation should still exist while slurm-bridge finalizer holds it: %v", err)
+	}
+	for _, f := range got.Finalizers {
+		if f == ReservationCascadeFinalizer {
+			t.Errorf("cascade finalizer should have been stripped, got finalizers=%v", got.Finalizers)
+		}
+	}
+	if got.DeletionTimestamp == nil {
+		t.Errorf("reservation should be terminating (deletionTimestamp set) after internal delete")
+	}
+}

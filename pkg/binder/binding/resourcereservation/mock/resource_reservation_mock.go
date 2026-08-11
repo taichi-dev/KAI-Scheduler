@@ -55,6 +55,37 @@ func (mr *MockInterfaceMockRecorder) RemovePodGpuGroupsConnection(ctx, pod any) 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RemovePodGpuGroupsConnection", reflect.TypeOf((*MockInterface)(nil).RemovePodGpuGroupsConnection), ctx, pod)
 }
 
+// EnsureReservation mocks base method.
+func (m *MockInterface) EnsureReservation(ctx context.Context, sourcePod *v1.Pod, gpuGroup string) (*v1.Pod, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "EnsureReservation", ctx, sourcePod, gpuGroup)
+	ret0, _ := ret[0].(*v1.Pod)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// EnsureReservation indicates an expected call of EnsureReservation.
+func (mr *MockInterfaceMockRecorder) EnsureReservation(ctx, sourcePod, gpuGroup any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EnsureReservation", reflect.TypeOf((*MockInterface)(nil).EnsureReservation), ctx, sourcePod, gpuGroup)
+}
+
+// ReservationPlacement mocks base method.
+func (m *MockInterface) ReservationPlacement(ctx context.Context, gpuGroup string) (bool, string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ReservationPlacement", ctx, gpuGroup)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(string)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// ReservationPlacement indicates an expected call of ReservationPlacement.
+func (mr *MockInterfaceMockRecorder) ReservationPlacement(ctx, gpuGroup any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReservationPlacement", reflect.TypeOf((*MockInterface)(nil).ReservationPlacement), ctx, gpuGroup)
+}
+
 // ReserveGpuDevice mocks base method.
 func (m *MockInterface) ReserveGpuDevice(ctx context.Context, pod *v1.Pod, nodeName, gpuGroup string) (string, error) {
 	m.ctrl.T.Helper()

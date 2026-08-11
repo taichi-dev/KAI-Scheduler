@@ -36,6 +36,11 @@ import (
 
 const (
 	podBoundCondition = "PodBound"
+	// reservationPendingRequeue is how often a BindRequest is retried while its GPU
+	// reservation pod is parked (still Pending, e.g. queued in slurm-bridge waiting for a
+	// whole GPU). Short enough that the fraction binds promptly once the reservation is
+	// placed, without a terminal-failure backoff.
+	reservationPendingRequeue = 10 * time.Second
 )
 
 // BindRequestReconciler reconciles a BindRequest object
@@ -93,6 +98,9 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	var bindRequest = &schedulingv1alpha2.BindRequest{}
 	var pod *v1.Pod
+	// Set when Bind reports the GPU reservation is parked (still Pending). The fraction is
+	// neither bound nor failed: keep the BindRequest non-terminal and requeue.
+	var reservationPending bool
 
 	// Fetch the BindRequest instance
 	if err = r.Client.Get(ctx, req.NamespacedName, bindRequest); err != nil {
@@ -115,6 +123,16 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if r := recover(); r != nil {
 			finalError = fmt.Errorf("Internal Error: %v\n%s", r, string(debug.Stack()))
 			err = fmt.Errorf("Internal Error: %v", r)
+		}
+
+		if reservationPending && finalError == nil {
+			// Parked reservation: keep the BindRequest non-terminal (no phase change, no
+			// failed-attempt increment) so it is protected from GC and the fraction stays
+			// Pending, and requeue to poll for the reservation being placed. Skip the
+			// pod-condition update so we don't falsely report the pod as Bound.
+			result.RequeueAfter = reservationPendingRequeue
+			err = nil
+			return
 		}
 
 		result, err = r.UpdateStatus(ctx, bindRequest, result, err)
@@ -160,6 +178,16 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			" Delete it and a new, valid one will be created.", "pod", pod.Name,
 			"namespace", pod.Namespace)
 		err = r.Client.Delete(ctx, bindRequest)
+	}
+	if errors.Is(err, resourcereservation.ErrReservationPending) {
+		// The GPU reservation is parked (still Pending, e.g. queued in slurm-bridge waiting
+		// for a whole GPU). Do NOT roll back the fraction pod's GPU-group binding: keep the
+		// parked reservation in place so it holds its queue spot and is reused next reconcile.
+		// The deferred handler requeues without marking the BindRequest Failed.
+		reservationPending = true
+		logger.Info("GPU reservation still pending; keeping it parked and requeueing",
+			"pod", pod.Name, "namespace", pod.Namespace, "node", node.Name)
+		return result, err
 	}
 	if err != nil {
 		logger.Error(err, "Failed to bind pod to node", "pod", pod.Name, "namespace", pod.Namespace,

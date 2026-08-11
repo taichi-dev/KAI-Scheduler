@@ -117,6 +117,10 @@ func New(options *Options, config *rest.Config) (*App, error) {
 		options.ResourceReservationPodResources.Value,
 		options.ResourceReservationPodSecurityContext.Value,
 		options.ResourceReservationContainerSecurityContext.Value)
+	if options.ReservationSchedulerName != "" {
+		rrs = rrs.WithExternalReservation(options.ReservationSchedulerName,
+			options.ReservationGpuResourceName, options.ReservationPodAnnotations)
+	}
 
 	reconcilerParams := &controllers.ReconcilerParams{
 		MaxConcurrentReconciles:     options.MaxConcurrentReconciles,
@@ -175,6 +179,27 @@ func (app *App) Run(ctx context.Context) error {
 		binder, app.rrs)
 	if err = reconciler.SetupWithManager(app.manager); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "BindRequest")
+		return err
+	}
+
+	if err = (&controllers.ReserveAheadReconciler{
+		Client:              app.manager.GetClient(),
+		Scheme:              app.manager.GetScheme(),
+		ResourceReservation: app.rrs,
+		SchedulerName:       app.Options.SchedulerName,
+		Enabled:             app.Options.ReservationSchedulerName != "",
+	}).SetupWithManager(app.manager, app.reconcilerParams); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "ReserveAhead")
+		return err
+	}
+
+	if err = (&controllers.ReservationCascadeReconciler{
+		Client:               app.manager.GetClient(),
+		Scheme:               app.manager.GetScheme(),
+		ReservationNamespace: app.Options.ResourceReservationNamespace,
+		Enabled:              app.Options.ReservationSchedulerName != "",
+	}).SetupWithManager(app.manager, app.reconcilerParams); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "ReservationCascade")
 		return err
 	}
 	// +kubebuilder:scaffold:builder

@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -36,6 +37,16 @@ type Interface interface {
 	SyncForGpuGroup(ctx context.Context, gpuGroup string) error
 	ReserveGpuDevice(ctx context.Context, pod *v1.Pod, nodeName string, gpuGroup string) (string, error)
 	RemovePodGpuGroupsConnection(ctx context.Context, pod *v1.Pod) error
+	// EnsureReservation creates (idempotently, by gpuGroup) a whole-GPU reservation pod for the
+	// given gpuGroup, WITHOUT binding it to a node — the external scheduler (slurm-bridge) places
+	// it. Used by the reserve-ahead controller to enqueue a reservation for a Pending fraction
+	// that cannot yet pack, so Slurm can make room (preempt) while the fraction waits. External
+	// reservation mode only.
+	EnsureReservation(ctx context.Context, sourcePod *v1.Pod, gpuGroup string) (*v1.Pod, error)
+	// ReservationPlacement reports whether the reservation pod for gpuGroup has been placed and is
+	// ready to back a fraction (Running, scheduled to a node, and has self-reported its GPU index),
+	// along with the node it landed on.
+	ReservationPlacement(ctx context.Context, gpuGroup string) (ready bool, nodeName string, err error)
 }
 
 const (
@@ -44,7 +55,29 @@ const (
 	gpuIndexAnnotationName  = "run.ai/reserve_for_gpu_index"
 	numberOfGPUsToReserve   = 1
 	unknownGpuIndicator     = "-1"
+	// pendingGpuIndicator is returned by waitForGPUReservationPodAllocation when the
+	// reservation pod did not allocate within the timeout but is still Pending (e.g. an
+	// external scheduler such as slurm-bridge has enqueued its Slurm job and is waiting
+	// for a whole GPU to free). Distinct from unknownGpuIndicator, which means the
+	// reservation genuinely failed and should be reaped.
+	pendingGpuIndicator = "-2"
+	// ReservationCascadeFinalizer is placed on externally-scheduled reservation pods so that
+	// deleting a reservation cascades to the GPU-fraction workloads it backs: a controller
+	// deletes those fractions and only removes this finalizer once they are gone. Without it,
+	// deleting the reservation frees the whole GPU in Slurm (slurm-bridge cancels the GRES job
+	// on pod termination) while the fractions keep running on it — a silent double-booking.
+	ReservationCascadeFinalizer = "kai.scheduler/reservation-cascade"
 )
+
+// ErrReservationPending signals that a GPU reservation pod was created and is still
+// Pending (parked, e.g. waiting in an external scheduler's queue) rather than failed.
+// The BindRequest reconciler treats it as "retry later" — it must NOT roll back the
+// fraction pod's GPU-group binding or mark the BindRequest Failed, so the parked
+// reservation keeps its place in the queue and is reused on the next reconcile. The
+// parked reservation is protected from GC while its BindRequest stays non-terminal
+// (see hasActiveBindRequestsForGpuGroup) and is torn down by the reservation sync once
+// the fraction binds elsewhere (packs onto a freed GPU) and its BindRequest goes terminal.
+var ErrReservationPending = errors.New("gpu reservation pod is still pending allocation")
 
 type service struct {
 	fakeGPuNodes                        bool
@@ -60,6 +93,9 @@ type service struct {
 	podResources                        *v1.ResourceRequirements
 	reservationPodSecurityContext       *v1.PodSecurityContext
 	reservationContainerSecurityContext *v1.SecurityContext
+	reservationSchedulerName            string
+	reservationGpuResourceName          string
+	reservationPodAnnotations           map[string]string
 }
 
 func NewService(
@@ -91,6 +127,39 @@ func NewService(
 		reservationPodSecurityContext:       reservationPodSecurityContext,
 		reservationContainerSecurityContext: reservationContainerSecurityContext,
 	}
+}
+
+// WithExternalReservation switches the service into "external reservation" mode: reservation
+// pods are created unbound with the given spec.schedulerName (so an external scheduler places
+// them) instead of being pre-bound via spec.nodeName. They request gpuResourceName for the whole
+// GPU (defaulting to nvidia.com/gpu when empty) and carry the given extra annotations. Passing an
+// empty schedulerName leaves the service in the default pinned mode.
+func (rsc *service) WithExternalReservation(schedulerName, gpuResourceName string, podAnnotations map[string]string) *service {
+	rsc.reservationSchedulerName = schedulerName
+	rsc.reservationGpuResourceName = gpuResourceName
+	rsc.reservationPodAnnotations = podAnnotations
+	return rsc
+}
+
+func (rsc *service) externalReservationMode() bool {
+	return rsc.reservationSchedulerName != ""
+}
+
+func (rsc *service) gpuResourceName() v1.ResourceName {
+	if rsc.reservationGpuResourceName != "" {
+		return v1.ResourceName(rsc.reservationGpuResourceName)
+	}
+	return constants.NvidiaGpuResource
+}
+
+// reservationPodAnnotationsMap returns the annotations to stamp on a reservation pod: always the
+// karpenter do-not-disrupt annotation, plus any configured external-mode annotations.
+func (rsc *service) reservationPodAnnotationsMap() map[string]string {
+	annotations := map[string]string{
+		karpenterv1.DoNotDisruptAnnotationKey: "true",
+	}
+	maps.Copy(annotations, rsc.reservationPodAnnotations)
+	return annotations
 }
 
 func (rsc *service) Sync(ctx context.Context) error {
@@ -324,6 +393,38 @@ func (rsc *service) RemovePodGpuGroupsConnection(ctx context.Context, pod *v1.Po
 	return nil
 }
 
+func (rsc *service) EnsureReservation(ctx context.Context, sourcePod *v1.Pod, gpuGroup string) (*v1.Pod, error) {
+	if !rsc.externalReservationMode() {
+		return nil, fmt.Errorf("reserve-ahead requires external reservation mode (reservationSchedulerName)")
+	}
+	// nodeName "" — the external scheduler (slurm-bridge) picks the node and places the pod.
+	return rsc.createGPUReservationPod(ctx, sourcePod, "", gpuGroup)
+}
+
+func (rsc *service) ReservationPlacement(ctx context.Context, gpuGroup string) (bool, string, error) {
+	gpuIndex, err := rsc.findGPUIndexByGroup(gpuGroup)
+	if err != nil {
+		// The reservation pod exists but has not self-reported its GPU index yet — not ready.
+		return false, "", nil
+	}
+	if gpuIndex == "" {
+		// No reservation pod for this group.
+		return false, "", nil
+	}
+	pods := &v1.PodList{}
+	if listErr := rsc.kubeClient.List(ctx, pods,
+		client.InNamespace(rsc.namespace),
+		client.MatchingLabels{constants.GPUGroup: gpuGroup}); listErr != nil {
+		return false, "", listErr
+	}
+	if len(pods.Items) == 0 {
+		return false, "", nil
+	}
+	pod := pods.Items[0]
+	ready := pod.Status.Phase == v1.PodRunning && pod.Spec.NodeName != ""
+	return ready, pod.Spec.NodeName, nil
+}
+
 // escapeJSONPointer escapes a string for use in a JSON Pointer path (RFC 6901).
 // ~ must be escaped as ~0, and / must be escaped as ~1.
 func escapeJSONPointer(s string) string {
@@ -379,6 +480,15 @@ func (rsc *service) createGPUReservationPodAndGetIndex(
 	}
 
 	gpuIndex = rsc.waitForGPUReservationPodAllocation(ctx, nodeName, pod.Name)
+	if gpuIndex == pendingGpuIndicator {
+		// The reservation is still Pending (parked): do NOT delete it. Keep it in place
+		// so it holds its spot in the external scheduler's queue and is reused on the next
+		// reconcile. The caller (BindRequest reconciler) requeues without rollback.
+		logger.Info("GPU reservation pod is still pending, parking it for retry",
+			"name", pod.Name, "gpuGroup", gpuGroup)
+		return unknownGpuIndicator, fmt.Errorf(
+			"gpu reservation pod %v/%v: %w", rsc.namespace, pod.Name, ErrReservationPending)
+	}
 	if gpuIndex == unknownGpuIndicator {
 		deleteErr := rsc.deleteReservationPod(ctx, pod)
 		if deleteErr != nil {
@@ -386,6 +496,30 @@ func (rsc *service) createGPUReservationPodAndGetIndex(
 		}
 		return unknownGpuIndicator, fmt.Errorf(
 			"failed waiting for GPU reservation pod to allocate: %v/%v", rsc.namespace, pod.Name)
+	}
+
+	if rsc.externalReservationMode() && nodeName != "" {
+		// The reservation pod is running now (it self-reported its GPU index), so the external
+		// scheduler has set its nodeName. In v1 (static single-GPU-node pool) the fraction pod is
+		// bound to the scheduler-selected node, so the reservation must have landed there too;
+		// otherwise the fraction would share a GPU that lives on a different node. Fail loudly
+		// instead of binding to the wrong node. True multi-node "follow the reservation" is a
+		// Phase-2 change to the bind path.
+		placed := &v1.Pod{}
+		if getErr := rsc.kubeClient.Get(ctx,
+			types.NamespacedName{Namespace: rsc.namespace, Name: pod.Name}, placed); getErr != nil {
+			return unknownGpuIndicator, fmt.Errorf(
+				"failed to read externally-scheduled reservation pod %v/%v: %w", rsc.namespace, pod.Name, getErr)
+		}
+		if placed.Spec.NodeName != "" && placed.Spec.NodeName != nodeName {
+			if deleteErr := rsc.deleteReservationPod(ctx, placed); deleteErr != nil {
+				logger.Error(deleteErr, "failed to delete diverged reservation pod", "name", pod.Name)
+			}
+			return unknownGpuIndicator, fmt.Errorf(
+				"external reservation pod %v/%v was placed on node %q but the scheduler selected %q; "+
+					"multi-node external placement is not supported in v1 (static single-GPU-node pool)",
+				rsc.namespace, pod.Name, placed.Spec.NodeName, nodeName)
+		}
 	}
 
 	return gpuIndex, err
@@ -411,6 +545,25 @@ func (rsc *service) deleteNonReservedPods(ctx context.Context, gpuGroup string, 
 
 func (rsc *service) deleteReservationPod(ctx context.Context, pod *v1.Pod) error {
 	logger := log.FromContext(ctx)
+	// This is the INTERNAL reservation deleter (reap-on-allocation-timeout, node-divergence
+	// guard, and orphan cleanup in syncForPods). Strip our cascade finalizer first so this
+	// system-initiated deletion does NOT cascade to the backed fraction workloads — otherwise a
+	// transient/racy internal reservation delete would kill healthy fractions. Only an EXTERNAL
+	// delete (which leaves the finalizer intact) should trigger the cascade.
+	if slices.Contains(pod.Finalizers, ReservationCascadeFinalizer) {
+		original := pod.DeepCopy()
+		kept := make([]string, 0, len(pod.Finalizers))
+		for _, f := range pod.Finalizers {
+			if f != ReservationCascadeFinalizer {
+				kept = append(kept, f)
+			}
+		}
+		pod.Finalizers = kept
+		if patchErr := rsc.kubeClient.Patch(ctx, pod, client.MergeFrom(original)); patchErr != nil &&
+			!apierrors.IsNotFound(patchErr) {
+			return fmt.Errorf("failed to strip cascade finalizer from reservation pod %s: %w", pod.Name, patchErr)
+		}
+	}
 	logger.Info("Deleting reservation pod", "name", pod.Name)
 	err := rsc.kubeClient.Delete(ctx,
 		pod,
@@ -433,25 +586,35 @@ func (rsc *service) createGPUReservationPod(
 		return nil, fmt.Errorf("cluster is scaling up, could not create reservation pod")
 	}
 
-	podName := reservationPodName(nodeName, gpuGroup)
+	// In external-reservation mode the pod is not pre-bound, so its name must not depend on a
+	// node (there isn't one yet) — key it on the gpu-group only so concurrent/retried creates
+	// still collide on a single object.
+	nameNode := nodeName
+	if rsc.externalReservationMode() {
+		nameNode = ""
+	}
+	podName := reservationPodName(nameNode, gpuGroup)
 
-	// Build resource requirements starting with GPU resources
+	// Build resource requirements starting with the whole-GPU request. The resource key is
+	// configurable (e.g. deviceclass.resource.kubernetes.io/gpu.nvidia.com for a DRA-backed
+	// extended resource under slurm-bridge) and defaults to nvidia.com/gpu.
+	gpuResource := rsc.gpuResourceName()
 	resources := v1.ResourceRequirements{
 		Limits: v1.ResourceList{
-			constants.NvidiaGpuResource: *resource.NewQuantity(numberOfGPUsToReserve, resource.DecimalSI),
+			gpuResource: *resource.NewQuantity(numberOfGPUsToReserve, resource.DecimalSI),
 		},
 		Requests: v1.ResourceList{
-			constants.NvidiaGpuResource: *resource.NewQuantity(numberOfGPUsToReserve, resource.DecimalSI),
+			gpuResource: *resource.NewQuantity(numberOfGPUsToReserve, resource.DecimalSI),
 		},
 	}
 
 	if rsc.podResources != nil {
 		if rsc.podResources.Limits != nil {
-			delete(rsc.podResources.Limits, constants.NvidiaGpuResource)
+			delete(rsc.podResources.Limits, gpuResource)
 			maps.Copy(resources.Limits, rsc.podResources.Limits)
 		}
 		if rsc.podResources.Requests != nil {
-			delete(rsc.podResources.Requests, constants.NvidiaGpuResource)
+			delete(rsc.podResources.Requests, gpuResource)
 			maps.Copy(resources.Requests, rsc.podResources.Requests)
 		}
 	}
@@ -506,7 +669,10 @@ func (rsc *service) waitForGPUReservationPodAllocation(
 			logger.Error(fmt.Errorf("timeout"),
 				"Reached timeout while waiting for GPU reservation pod to be allocated",
 				"nodeName", nodeName, "name", gpuReservationPodName)
-			return unknownGpuIndicator
+			// A reservation that is still Pending after the timeout has not failed — an
+			// external scheduler (slurm-bridge) may have enqueued it and be waiting for a
+			// whole GPU. Signal "parked" so the caller keeps it instead of reaping it.
+			return rsc.timeoutAllocationIndicator(ctx, gpuReservationPodName)
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
 				logger.Error(nil,
@@ -530,6 +696,23 @@ func (rsc *service) waitForGPUReservationPodAllocation(
 	}
 }
 
+// timeoutAllocationIndicator classifies a reservation pod that did not report its GPU
+// index within the allocation timeout: pendingGpuIndicator if it still exists and is
+// Pending (parked, e.g. waiting in slurm-bridge's queue) so the caller keeps it, or
+// unknownGpuIndicator otherwise (gone / failed) so the caller reaps it.
+func (rsc *service) timeoutAllocationIndicator(ctx context.Context, gpuReservationPodName string) string {
+	pod := &v1.Pod{}
+	if err := rsc.kubeClient.Get(ctx,
+		types.NamespacedName{Namespace: rsc.namespace, Name: gpuReservationPodName}, pod); err != nil {
+		// Cannot confirm it is parked (e.g. not found): treat as failed so it is reaped.
+		return unknownGpuIndicator
+	}
+	if pod.Status.Phase == v1.PodPending {
+		return pendingGpuIndicator
+	}
+	return unknownGpuIndicator
+}
+
 func (rsc *service) createResourceReservationPod(
 	sourcePod *v1.Pod, nodeName, gpuGroup, podName string, resources v1.ResourceRequirements,
 ) (*v1.Pod, error) {
@@ -547,12 +730,9 @@ func (rsc *service) createResourceReservationPod(
 				constants.AppLabelName: rsc.appLabelValue,
 				constants.GPUGroup:     gpuGroup,
 			},
-			Annotations: map[string]string{
-				karpenterv1.DoNotDisruptAnnotationKey: "true",
-			},
+			Annotations: rsc.reservationPodAnnotationsMap(),
 		},
 		Spec: v1.PodSpec{
-			NodeName:    nodeName,
 			Tolerations: tolerations,
 			RuntimeClassName: func() *string {
 				if len(rsc.runtimeClassName) == 0 {
@@ -590,14 +770,26 @@ func (rsc *service) createResourceReservationPod(
 				},
 			},
 		},
-		Status: v1.PodStatus{
+	}
+
+	if rsc.externalReservationMode() {
+		// Leave the pod unbound (no nodeName, no faked PodScheduled) so the external scheduler
+		// places it; the whole-GPU request keeps it from double-booking.
+		podSpec.Spec.SchedulerName = rsc.reservationSchedulerName
+		// Cascade-delete the backed fractions if this reservation is deleted (see finalizer doc).
+		podSpec.Finalizers = append(podSpec.Finalizers, ReservationCascadeFinalizer)
+	} else {
+		// Default behavior: pre-bind the reservation pod to the selected node and mark it
+		// PodScheduled so the kubelet/device-plugin admits it without any scheduling pass.
+		podSpec.Spec.NodeName = nodeName
+		podSpec.Status = v1.PodStatus{
 			Conditions: []v1.PodCondition{
 				{
 					Type:   v1.PodScheduled,
 					Status: v1.ConditionTrue,
 				},
 			},
-		},
+		}
 	}
 
 	if rsc.fakeGPuNodes {

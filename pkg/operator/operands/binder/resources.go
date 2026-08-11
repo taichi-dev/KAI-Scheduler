@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 
 	"golang.org/x/mod/semver"
@@ -254,6 +255,27 @@ func buildArgsList(kaiConfig *kaiv1.Config, config *kaiv1binder.Binder, fakeGPU 
 	if config.ResourceReservation.AllocationTimeout != nil {
 		args = append(args, fmt.Sprintf("--resource-reservation-allocation-timeout=%d",
 			*config.ResourceReservation.AllocationTimeout))
+	}
+
+	// External-reservation mode: thread the global config into the binder so it creates
+	// reservation pods for an external scheduler (e.g. slurm-bridge-scheduler) instead of
+	// pinning them to the KAI-selected node. Empty/nil leaves the default pinned behavior
+	// (no args added — so existing deployments are unaffected).
+	if name := kaiConfig.Spec.Global.ReservationSchedulerName; name != nil && *name != "" {
+		args = append(args, "--reservation-scheduler-name", *name)
+	}
+	if res := kaiConfig.Spec.Global.ReservationGpuResourceName; res != nil && *res != "" {
+		args = append(args, "--reservation-gpu-resource-name", *res)
+	}
+	if ann := kaiConfig.Spec.Global.ReservationPodAnnotations; len(ann) > 0 {
+		keys := make([]string, 0, len(ann))
+		for k := range ann {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys) // stable arg order so the binder Deployment doesn't churn on reconcile
+		for _, k := range keys {
+			args = append(args, "--reservation-pod-annotations", fmt.Sprintf("%s=%s", k, ann[k]))
+		}
 	}
 
 	pluginsConfig := binderplugins.FromAPIConfig(config.Plugins)

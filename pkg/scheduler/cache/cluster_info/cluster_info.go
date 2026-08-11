@@ -347,10 +347,19 @@ func (c *ClusterInfo) populateDRAGPUs(nodes map[string]*node_info.NodeInfo) {
 
 		if draGPUCount > 0 {
 			log.InfraLogger.V(6).Infof("Node %s has %d DRA GPUs from ResourceSlices", nodeName, draGPUCount)
-			if nodeInfo.AllocatableVector.Get(resource_info.GPUIndex) > 0 {
-				log.InfraLogger.Warningf("Node %s has both device-plugin GPUs and DRA GPUs", nodeName)
+			// A node may expose GPUs through BOTH the device plugin and DRA (meshy fork:
+			// the whole-GPU reservation is held via DRA while the device plugin advertises
+			// the same physical GPUs so KAI's fractional-sharing accounting has its
+			// nvidia.com/gpu + nvidia.com/gpu.memory signals). The two describe the SAME
+			// hardware, so the node's true GPU count is max(device-plugin, DRA), not the
+			// sum. Adding both would double-count the physical GPUs (e.g. one T4 -> 2),
+			// leaving a phantom idle GPU that the scheduler keeps trying to fill with new
+			// reservation pods that can never be placed. Only add the DRA devices not
+			// already covered by the device-plugin allocatable.
+			devicePluginGPUs := int64(nodeInfo.AllocatableVector.Get(resource_info.GPUIndex))
+			if extraDRAGPUs := draGPUCount - devicePluginGPUs; extraDRAGPUs > 0 {
+				nodeInfo.AddDRAGPUs(float64(extraDRAGPUs))
 			}
-			nodeInfo.AddDRAGPUs(float64(draGPUCount))
 			nodeInfo.HasDRAGPUs = true
 		}
 	}

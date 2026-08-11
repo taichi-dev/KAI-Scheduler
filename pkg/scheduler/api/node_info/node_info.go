@@ -90,6 +90,16 @@ type NodeInfo struct {
 	// HasDRAGPUs indicates GPUs were added via DRA ResourceSlices. Temporary fix - remove when device-plugin pods are supported on DRA nodes.
 	HasDRAGPUs bool
 
+	// DevicePluginGPUs is the node's GPU count as advertised by the device plugin
+	// (nvidia.com/gpu in Status.Allocatable), captured at construction BEFORE any
+	// DRA ResourceSlice GPUs are merged into AllocatableVector. It is the signal for
+	// whether KAI's fractional-sharing accounting can work on the node: a value > 0
+	// means the device plugin also supplies the nvidia.com/gpu.memory GFD label the
+	// accounting anchors on. On a DRA-only node this is 0 even though AllocatableVector
+	// GPU > 0 (DRA GPUs are added there), so it — not AllocatableVector — must gate the
+	// "fractional not supported on DRA-only nodes" check.
+	DevicePluginGPUs float64
+
 	NodeResourceTopology *nrtv1alpha2.NodeResourceTopology
 
 	NumaTopology *NumaTopology
@@ -103,6 +113,9 @@ func NewNodeInfo(node *v1.Node, podAffinityInfo pod_affinity.NodePodAffinityInfo
 	gpuMemory, exists := getNodeGpuMemory(node)
 
 	allocatableVector := resource_info.ResourceFromResourceList(node.Status.Allocatable).ToVector(vectorMap)
+	// Capture the device-plugin GPU count before any DRA ResourceSlice GPUs are merged
+	// in via AddDRAGPUs (see DevicePluginGPUs field).
+	devicePluginGPUs := allocatableVector.Get(resource_info.GPUIndex)
 	idleVector := allocatableVector.Clone()
 	usedVector := resource_info.NewResourceVector(vectorMap)
 	releasingVector := resource_info.NewResourceVector(vectorMap)
@@ -122,6 +135,7 @@ func NewNodeInfo(node *v1.Node, podAffinityInfo pod_affinity.NodePodAffinityInfo
 		PodInfos:               make(map[common_info.PodID]*pod_info.PodInfo),
 		MemoryOfEveryGpuOnNode: gpuMemory,
 		GpuMemorySynced:        exists,
+		DevicePluginGPUs:       devicePluginGPUs,
 		LegacyMIGTasks:         map[common_info.PodID]string{},
 
 		GpuSharingNodeInfo: *newGpuSharingNodeInfo(),
@@ -314,7 +328,15 @@ func (ni *NodeInfo) PredicateByNodeResourcesType(task *pod_info.PodInfo) error {
 		return nil
 	}
 
-	if ni.HasDRAGPUs && task.IsSharedGPURequest() {
+	// Reject fractional/shared GPU pods only on DRA-ONLY nodes (matching this message). A node
+	// that ALSO advertises device-plugin GPUs (DevicePluginGPUs > 0, i.e. it carries the
+	// nvidia.com/gpu.memory GFD label) has the signals KAI's sharing accounting needs, so
+	// fractional sharing works there even though the whole-GPU reservation is held via DRA
+	// (meshy fork: the reservation pod goes through slurm-bridge as a DRA-backed extended
+	// resource). Note we must test DevicePluginGPUs, not AllocatableVector[GPU]: AddDRAGPUs
+	// merges DRA ResourceSlice GPUs into AllocatableVector, so on a DRA-only node that vector
+	// is > 0 and would wrongly bypass this guard.
+	if ni.HasDRAGPUs && ni.DevicePluginGPUs <= 0 && task.IsSharedGPURequest() {
 		return common_info.NewFitError(task.Name, task.Namespace, ni.Name,
 			"fractional/shared GPU pods are not yet supported on DRA-only nodes")
 	}

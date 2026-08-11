@@ -2569,6 +2569,38 @@ func TestSnapshotNodesWithDRAGPUs(t *testing.T) {
 			expectedDRAGPUs: map[string]float64{"node-1": 6},
 			hasDRAGPUs:      map[string]bool{"node-1": true},
 		},
+		// meshy fork: a node that exposes the SAME physical GPUs through both the
+		// device plugin and DRA must not double-count them. Total = max(device-plugin, DRA).
+		"Both device-plugin and DRA for the same physical GPUs": {
+			nodes: []*corev1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+					Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+						"nvidia.com/gpu": resource.MustParse("1"),
+					}},
+				},
+			},
+			resourceSlices: []*resourceapi.ResourceSlice{
+				createTestResourceSlice("slice-1", "node-1", "nvidia.com/gpu", 1),
+			},
+			expectedDRAGPUs: map[string]float64{"node-1": 1}, // not 2
+			hasDRAGPUs:      map[string]bool{"node-1": true},
+		},
+		"More DRA GPUs than device-plugin GPUs (add only the excess)": {
+			nodes: []*corev1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+					Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+						"nvidia.com/gpu": resource.MustParse("2"),
+					}},
+				},
+			},
+			resourceSlices: []*resourceapi.ResourceSlice{
+				createTestResourceSlice("slice-1", "node-1", "nvidia.com/gpu", 4),
+			},
+			expectedDRAGPUs: map[string]float64{"node-1": 4}, // max(2,4)
+			hasDRAGPUs:      map[string]bool{"node-1": true},
+		},
 	}
 
 	for name, test := range tests {
