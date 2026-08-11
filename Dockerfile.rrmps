@@ -1,0 +1,16 @@
+# Reservation ("capacity") pod image for the MPS-host role.
+# Unlike the default distroless image, this uses a glibc base (ubuntu) so the pod can run
+# nvidia-cuda-mps-control — the MPS control daemon binary is mounted at runtime by the NVIDIA
+# container toolkit (NVIDIA_DRIVER_CAPABILITIES=compute,utility), but it is dynamically linked and
+# needs glibc + the driver libs (also toolkit-mounted). The resourcereservation binary is CGO
+# (NVIDIA go-nvml), so it is compiled with CGO_ENABLED=1 from source here.
+FROM golang:1.26.3 AS build
+WORKDIR /src
+COPY . .
+ARG TARGETARCH=amd64
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -o /app ./cmd/resourcereservation
+
+FROM ubuntu:22.04 AS prod
+# runs as root so the MPS control daemon can serve client (fraction) contexts
+COPY --from=build /app /workspace/app
+ENTRYPOINT ["/workspace/app"]

@@ -842,6 +842,18 @@ func (rsc *service) applyMPSHosting(podSpec *v1.Pod, gpuGroup string) {
 	})
 
 	container := &podSpec.Spec.Containers[0]
+	// The MPS control daemon must create its per-GPU pipe/log dirs on the shared (root-owned)
+	// hostPath and run nvidia-cuda-mps-control to serve client contexts, so an MPS-hosting
+	// reservation container runs as root — overriding the default non-root reservation security
+	// context. Only reservations that host MPS are elevated; non-MPS reservations are untouched.
+	root := int64(0)
+	nonRoot := false
+	allowPrivEsc := true
+	container.SecurityContext = &v1.SecurityContext{
+		RunAsUser:                &root,
+		RunAsNonRoot:             &nonRoot,
+		AllowPrivilegeEscalation: &allowPrivEsc,
+	}
 	container.VolumeMounts = append(container.VolumeMounts, v1.VolumeMount{
 		Name:      mps.VolumeName,
 		MountPath: rsc.mpsBaseDir,
