@@ -447,8 +447,15 @@ func getPodGroupID(pod *v1.Pod) common_info.PodGroupID {
 }
 
 func getPodResourceRequest(pod *v1.Pod) *resource_info.ResourceRequirements {
-	reqs := resourcehelpers.AggregateContainerRequests(pod, resourcehelpers.PodResourcesOptions{
+	// PodRequests is the aggregation kubelet admission and kube-scheduler use:
+	// the KEP-753 container/sidecar/init formula, KEP-1287 effective requests
+	// for pods already on a node, and KEP-2837 pod-level resources, where a
+	// pod-level cpu/memory/hugepages request replaces the container-derived
+	// value for that resource. Pod-level resources cannot express GPUs, so the
+	// GPU half is unaffected. Overhead is added below, GPU-less, as before.
+	reqs := resourcehelpers.PodRequests(pod, resourcehelpers.PodResourcesOptions{
 		UseStatusResources: true,
+		ExcludeOverhead:    true,
 	})
 	result := resource_info.RequirementsFromResourceList(reqs)
 
